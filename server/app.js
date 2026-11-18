@@ -250,7 +250,7 @@ function sendImage(res, path, status = 200) {
 async function downloadCover(kind, value, size, target) {
   const url = `https://covers.openlibrary.org/b/${kind}/${value}-${size}.jpg?default=false`;
   const upstream = await fetch(url, {
-    headers: { 'User-Agent': 'Orelha/0.1 (personal reading diary)' },
+    headers: { 'User-Agent': 'Orelha/1.0 (personal reading diary)' },
     signal: AbortSignal.timeout(20_000),
   });
   if (!upstream.ok) return false;

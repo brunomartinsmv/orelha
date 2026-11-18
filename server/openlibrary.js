@@ -1,7 +1,7 @@
 // Acesso à Open Library (e BrasilAPI para ISBNs brasileiros), com cache em SQLite.
 import { db } from './db.js';
 
-const UA = 'Orelha/0.1 (personal reading diary)';
+const UA = 'Orelha/1.0 (personal reading diary)';
 const HOUR = 3600_000;
 const DOC_FIELDS = [
   'key', 'title', 'subtitle', 'author_name', 'first_publish_year', 'cover_i',

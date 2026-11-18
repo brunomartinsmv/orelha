@@ -91,7 +91,7 @@ async function loadPages(titles, { now, fetchImpl }) {
     pending.set(batchKey, (async () => {
       const url = new URL(API);
       url.search = new URLSearchParams({ action: 'query', titles: missing.join('|'), prop: 'revisions', rvprop: 'content', rvslots: 'main', redirects: '1', format: 'json', formatversion: '2' });
-      const res = await fetchImpl(url, { headers: { 'User-Agent': 'Orelha/0.1 (personal reading diary)', Accept: 'application/json' }, signal: AbortSignal.timeout(4500) });
+      const res = await fetchImpl(url, { headers: { 'User-Agent': 'Orelha/1.0 (personal reading diary)', Accept: 'application/json' }, signal: AbortSignal.timeout(4500) });
       if (!res.ok) throw new Error(`Wikiquote: HTTP ${res.status}`);
       const data = await res.json();
       if (!data.query?.pages) throw new Error('Wikiquote: resposta sem páginas');
