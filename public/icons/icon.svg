@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    .pl { fill: #233830; }
+    .pr { fill: #14231e; }
+    .ear { fill: #df9b0d; }
+    @media (prefers-color-scheme: dark) {
+      .pl { fill: #dfd8c5; }
+      .pr { fill: #f5f0e2; }
+      .ear { fill: #e9b949; }
+    }
+  </style>
+  <path class="pl" d="M3.2 5.4C7.5 4.4 12 5.1 15 7.4v19.2c-3-2-7.5-2.7-11.8-1.9A1.6 1.6 0 0 1 1.4 23V7c0-.8.7-1.4 1.8-1.6Z"/>
+  <path class="pr" d="M17 7.4c1.8-1.3 3.9-2.2 6.2-2.5v6c0 1.6 1.3 2.9 2.9 2.9h4.5V23c0 .9-.8 1.8-1.8 1.7-4.3-.8-8.8-.1-11.8 1.9V7.4Z"/>
+  <path class="ear" d="M25.2 5.1c0-.4.5-.6.8-.3l4.6 4.6c.3.3.1.8-.3.8h-3.6c-.8 0-1.5-.7-1.5-1.5V5.1Z"/>
+</svg>

@@ -1,0 +1,9 @@
+{
+  "port": 4173,
+  "publicPort": 8443,
+  "tailnetHost": "seu-mac.tailnet-exemplo.ts.net",
+  "allowedDevices": {
+    "mac": ["100.64.0.10", "fd7a:115c:a1e0::10"],
+    "iphone": ["100.64.0.11", "fd7a:115c:a1e0::11"]
+  }
+}
