@@ -2,6 +2,16 @@
 
 Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no seu computador (com zero dependências externas e sem etapa de build) e pode ser acessado com segurança pelos seus aparelhos na sua rede privada [Tailscale](https://tailscale.com), inclusive em modo offline somente leitura quando o computador está dormindo.
 
+![Estante de lombadas do Orelha](docs/estante.png)
+
+| Início (leitura atual e epígrafe) | Números da leitura e A pilha |
+| :---: | :---: |
+| ![Tela inicial com livro 3D e citação](docs/inicio.png) | ![Estatísticas e pilha física de livros no modo escuro](docs/numeros.png) |
+
+| Página do livro (modo escuro) | Celular / PWA (iOS e Android) |
+| :---: | :---: |
+| ![Página de Torto Arado no modo escuro](docs/livro.png) | <img src="docs/mobile-estante.png" width="48%" alt="Estante no celular"> <img src="docs/mobile-voce.png" width="48%" alt="Perfil e 4 favoritos no celular"> |
+
 ---
 
 ## Funcionalidades
