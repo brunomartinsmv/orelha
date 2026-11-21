@@ -79,15 +79,32 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
    }
    ```
 
-3. No macOS, instale o serviço em segundo plano (`LaunchAgent` + publicação no `tailscale serve`):
+3. No macOS, instale o serviço em segundo plano (`LaunchAgent` + publicação no `tailscale serve`). Faça isso a partir de um clone fixo (por exemplo `~/orelha`), não de um worktree: os dados ficam em `data/` dentro dele.
 
    ```sh
-   scripts/servico.sh instalar   # registra o LaunchAgent e ativa HTTPS na porta publicPort
-   scripts/servico.sh status     # verifica estado do processo e do tailscale serve
+   scripts/servico.sh verificar  # confere Node 24+, Tailscale, config.json e testes, sem mudar nada
+   scripts/servico.sh instalar   # verifica, registra o LaunchAgent, espera o servidor responder e ativa HTTPS na porta publicPort
+   scripts/servico.sh status     # estado do processo, versão no ar e tailscale serve
+   scripts/servico.sh logs       # acompanha data/orelha.log
    scripts/servico.sh remover    # desativa o serviço (seus dados em data/ são preservados)
    ```
 
 4. Abra `https://<tailnetHost>:<publicPort>` no Safari do iPhone e use **Compartilhar → Adicionar à Tela de Início** para usá-lo como aplicativo nativo.
+
+### Atualizando e lançando versões
+
+Para levar uma nova versão ao Mac que serve o Orelha:
+
+```sh
+scripts/servico.sh atualizar  # git pull --ff-only, verificações, reinício e conferência da versão no ar
+```
+
+Para lançar uma versão:
+
+1. Mova as entradas de **[Não publicado]** no [CHANGELOG.md](CHANGELOG.md) para uma nova seção com número e data.
+2. Atualize `version` no `package.json`; é a única fonte da versão (o `User-Agent` e o `/api/health` a leem dali).
+3. Se a lista de arquivos do app mudou, ajuste `SHELL_FILES` e suba `VERSION` em `public/sw.js`.
+4. Faça o commit, crie a tag (`git tag v1.2.3`) e envie com `git push --follow-tags`.
 
 ### Modelo de segurança e funcionamento offline
 
@@ -107,9 +124,11 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
 ## Estrutura do projeto
 
 ```text
+├── CHANGELOG.md             # Histórico de versões (Keep a Changelog)
 ├── config.example.json      # Modelo de configuração de portas e IPs da tailnet
 ├── server/
 │   ├── index.js             # Ponto de entrada (escuta apenas em 127.0.0.1)
+│   ├── version.js           # Versão lida do package.json (User-Agent e /api/health)
 │   ├── app.js               # Roteador HTTP, controle de acesso, upload e cache de capas
 │   ├── db.js                # Esquema SQLite nativo (node:sqlite) e transações
 │   ├── library.js           # Regras de domínio: estante, diário, listas, metas e estatísticas
@@ -125,6 +144,6 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
 ├── scripts/
 │   ├── seed-demo.js         # Popula dados de demonstração
 │   ├── import-home-catalogue.js # Utilitário de importação de catálogo JSON em lote
-│   └── servico.sh           # Gerenciador de LaunchAgent + tailscale serve no macOS
+│   └── servico.sh           # Implantação no macOS: LaunchAgent, tailscale serve, atualização
 └── test/                    # Testes automatizados com node:test
 ```
