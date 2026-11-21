@@ -60,7 +60,7 @@ verificar() {
     fi
   fi
 
-  (cd "$PROJECT" && "$NODE" --test test/ >/dev/null 2>&1) || falha "Os testes falharam. Rode 'npm test' para ver o motivo."
+  (cd "$PROJECT" && "$NODE" --test >/dev/null 2>&1) || falha "Os testes falharam. Rode 'npm test' para ver o motivo."
   ok "Testes passaram (versão $(versao_local))"
 }
 
