@@ -1,8 +1,10 @@
 // Cópia consistente do banco e das capas enviadas, fora da pasta do projeto.
 // Uso: node scripts/backup.js [pasta-de-destino]   (padrão: ORELHA_BACKUP_DIR ou a pasta de dados do usuário)
 // Guarda as últimas ORELHA_BACKUP_MANTER cópias (padrão 30) e confere cada uma antes de apagar as antigas.
+// Com "backupRemoto" no config.json (ou ORELHA_BACKUP_REMOTO), espelha a pasta num remoto do rclone, ex. "gdrive:Orelha/backups".
 import { backup, DatabaseSync } from 'node:sqlite';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -60,3 +62,16 @@ const antigas = readdirSync(destino).filter((n) => /^orelha-\d{8}-\d{6}$/.test(n
 for (const nome of antigas) rmSync(join(destino, nome), { recursive: true, force: true });
 
 console.log(`✓ Backup em ${final} (${livros} livros no banco, ${enviadas} capas enviadas)`);
+
+const configPath = process.env.ORELHA_CONFIG || join(import.meta.dirname, '..', 'config.json');
+const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
+const remoto = process.env.ORELHA_BACKUP_REMOTO ?? config.backupRemoto;
+if (remoto) {
+  // sync replica a rotação local no remoto; --max-delete evita apagar tudo lá se a pasta local vier quase vazia por engano.
+  const r = spawnSync('rclone', ['sync', destino, remoto, '--exclude', '*.parcial/**', '--max-delete', '5'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  if (r.error || r.status !== 0) {
+    console.error(`✗ A cópia local está feita, mas o envio para ${remoto} falhou${r.error ? `: ${r.error.message}` : ` (rclone saiu com ${r.status})`}.`);
+    process.exit(2);
+  }
+  console.log(`✓ Enviado para ${remoto}`);
+}

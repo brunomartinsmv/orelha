@@ -251,7 +251,7 @@ atualizar() {
 
   copia="$("$NODE" "$PROJECT/scripts/backup.js")" || falha "O backup falhou; atualização cancelada, nada foi mudado."
   echo "$copia"
-  copia="${copia#*Backup em }"; copia="${copia%% (*}"
+  copia="${copia#*Backup em }"; copia="${copia%% \(*}"
   versao_antes="$(versao_local)"
   git -C "$PROJECT" merge --ff-only --quiet "$alvo"
   if ! { launchctl kickstart -k "$DOMAIN/$LABEL" && saude; }; then
@@ -275,7 +275,7 @@ remover() {
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
   launchctl bootout "$DOMAIN/$BACKUP_LABEL" 2>/dev/null || true
   rm -f "$PLIST" "$BACKUP_PLIST"
-  if [ -n "$TAILSCALE" ]; then "$TAILSCALE" serve --https="$PUBLIC_PORT" off || true; fi
+  if [ -n "$TAILSCALE" ]; then "$TAILSCALE" serve --https="$PUBLIC_PORT" off 2>/dev/null || true; fi
   echo "Serviço removido. Seus dados continuam em $PROJECT/data."
 }
 

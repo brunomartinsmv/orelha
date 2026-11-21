@@ -294,7 +294,7 @@ remover() {
   systemctl --user disable --now "$UNIT" "$BACKUP_TIMER" 2>/dev/null || true
   rm -f "$UNIT_FILE" "$UNIT_DIR/$BACKUP_UNIT" "$UNIT_DIR/$BACKUP_TIMER"
   systemctl --user daemon-reload
-  if [ -n "$TAILSCALE" ]; then "$TAILSCALE" serve --https="$PUBLIC_PORT" off || true; fi
+  if [ -n "$TAILSCALE" ]; then "$TAILSCALE" serve --https="$PUBLIC_PORT" off 2>/dev/null || true; fi
   echo "Serviço removido. Seus dados continuam em $PROJECT/data. O linger continua ligado (sudo loginctl disable-linger $USER desliga)."
 }
 
