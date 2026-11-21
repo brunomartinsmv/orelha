@@ -59,6 +59,7 @@ for (let avisado = false; ;) {
 process.on('exit', () => {
   try { if (readFileSync(trava, 'utf8') === String(process.pid)) unlinkSync(trava); } catch {}
 });
+const ehBackup = (n) => /^orelha-\d{8}-\d{6}$/.test(n);
 const nomeAgora = () => join(destino, `orelha-${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}`);
 let final = nomeAgora();
 // Dois backups no mesmo segundo (o do atualizar e o do timer, por exemplo) teriam o mesmo nome.
@@ -99,7 +100,7 @@ if (existsSync(capas)) {
 }
 renameSync(parcial, final);
 
-const antigas = readdirSync(destino).filter((n) => /^orelha-\d{8}-\d{6}$/.test(n)).sort().slice(0, -manter);
+const antigas = readdirSync(destino).filter(ehBackup).sort().slice(0, -manter);
 for (const nome of antigas) rmSync(join(destino, nome), { recursive: true, force: true });
 
 console.log(`✓ Backup em ${final} (${livros} livros no banco, ${enviadas} capas enviadas)`);
@@ -108,11 +109,25 @@ const configPath = process.env.ORELHA_CONFIG || join(import.meta.dirname, '..', 
 const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
 const remoto = process.env.ORELHA_BACKUP_REMOTO ?? config.backupRemoto;
 if (remoto) {
-  // sync replica a rotação local no remoto; --max-delete evita apagar tudo lá se a pasta local vier quase vazia por engano.
-  const r = spawnSync(process.env.ORELHA_RCLONE || 'rclone', ['sync', destino, remoto, '--exclude', '*.parcial/**', '--exclude', '.trava', '--max-delete', '5'], { stdio: ['ignore', 'inherit', 'inherit'] });
-  if (r.error || r.status !== 0) {
-    console.error(`✗ A cópia local está feita, mas o envio para ${remoto} falhou${r.error ? `: ${r.error.message}` : ` (rclone saiu com ${r.status})`}.`);
+  const rclone = process.env.ORELHA_RCLONE || 'rclone';
+  const desistir = (motivo) => {
+    console.error(`✗ A cópia local está feita, mas o envio para ${remoto} falhou: ${motivo}.`);
     process.exit(2);
+  };
+  // O sync replica a rotação local no remoto. Antes, confere quantos backups ele apagaria lá: se a pasta
+  // local veio quase vazia por engano (outra máquina, outra pasta), não espelha. Não dá para usar
+  // --max-delete, que conta arquivos, e cada backup tem o banco mais todas as capas.
+  const lista = spawnSync(rclone, ['lsf', '--dirs-only', remoto], { encoding: 'utf8' });
+  if (lista.error) desistir(lista.error.message);
+  // 3 = a pasta ainda não existe no remoto.
+  if (lista.status !== 0 && lista.status !== 3) desistir(`rclone lsf saiu com ${lista.status}: ${lista.stderr.trim()}`);
+  const noRemoto = lista.status === 0 ? lista.stdout.split('\n').map((n) => n.replace(/\/$/, '')).filter(ehBackup) : [];
+  const locais = readdirSync(destino).filter(ehBackup);
+  if (locais.length * 2 < Math.min(noRemoto.length, manter)) {
+    desistir(`aqui há ${locais.length} backups e lá ${noRemoto.length}; o envio apagaria ${noRemoto.filter((n) => !locais.includes(n)).length} deles. Se for isso mesmo, rode rclone sync à mão`);
   }
+  const r = spawnSync(rclone, ['sync', destino, remoto, '--exclude', '*.parcial/**', '--exclude', '.trava'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  if (r.error) desistir(r.error.message);
+  if (r.status !== 0) desistir(`rclone saiu com ${r.status}`);
   console.log(`✓ Enviado para ${remoto}`);
 }
