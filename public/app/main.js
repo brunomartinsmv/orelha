@@ -84,7 +84,7 @@ function App() {
   }, []);
   const { view: View, props, tab, key } = match(path);
   return html`<div class="app">
-    ${offline && html`<div class="offline-pill" role="status">Mac dormindo: só leitura, última cópia</div>`}
+    ${offline && html`<div class="offline-pill" role="status">Sem conexão com o servidor: só leitura, última cópia</div>`}
     <${View} key=${key || path} search=${search} ...${props} />
     <${TabBar} tab=${tab} />
     <${Toaster} />
