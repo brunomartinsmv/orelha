@@ -14,7 +14,8 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - `scripts/servico.sh atualizar`: puxa o branch atual (`git pull --ff-only`), roda as verificações e reinicia o serviço; recusa seguir com alterações não commitadas.
 - `scripts/servico.sh reiniciar` e `scripts/servico.sh logs`.
 - `scripts/servico-linux.sh`, com os mesmos comandos, para servir pelo Linux com um serviço de usuário do systemd: liga o linger para subir no boot sem login e exige que o usuário seja operador do Tailscale.
-- `/api/health` passa a informar a versão em execução.
+- `/api/health` passa a informar a versão e o pid em execução.
+- `scripts/backup.js` e o comando `backup` dos dois scripts: copiam o banco (pela API de backup do SQLite, com o servidor rodando) e as capas enviadas para fora da pasta do projeto, conferem a integridade da cópia e guardam as últimas 30. `instalar` liga um backup diário (timer do systemd no Linux, LaunchAgent às 4h no macOS).
 
 ### Modificado
 
@@ -22,6 +23,10 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - O script encontra a CLI do Tailscale dentro do app da Mac App Store quando ela não está no `PATH`.
 - A instalação a partir de um worktree do Git é bloqueada, pois `data/` sumiria junto com o worktree (`ORELHA_PERMITIR_WORKTREE=1` libera).
 - O LaunchAgent espera 10 s entre reinícios após falha e roda com prioridade de segundo plano.
+- `atualizar` testa a versão nova num worktree temporário antes de mexer no checkout em uso, faz backup do banco e, se a versão nova não subir, volta para a anterior.
+- `instalar` gera e valida a unit ou o plist numa pasta à parte antes de trocar os atuais, e volta os anteriores se o serviço novo não subir. Caminhos com `&`, `<` ou `>` não quebram mais o plist.
+- O teste de saúde confere pelo pid que quem responde é o processo do serviço. `instalar` recusa seguir se outro processo ocupa a porta, ou se o serviço atual roda de outra pasta que tem o banco e este clone não tem (`ORELHA_BANCO_NOVO=1` libera).
+- O serviço roda com `UMask=0077` e, no Linux, com `NoNewPrivileges`, filtro de chamadas de sistema e famílias de socket restritas. `instalar` deixa `data/` em `700` e o banco em `600`.
 - A versão do app vem só do `package.json`; o `User-Agent` enviado à Open Library, à BrasilAPI e ao Wikiquote acompanha.
 
 ## [1.0.0] - 2026-11-18

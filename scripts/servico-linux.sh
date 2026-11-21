@@ -140,7 +140,8 @@ checar_porta() {
 }
 
 # Restrições que valem num serviço de usuário. ProtectSystem, ProtectHome e PrivateTmp ficam de fora: dependem de
-# namespaces de usuário, que o Ubuntu restringe, e o systemd as ignora sem avisar.
+# namespaces de usuário, que o Ubuntu restringe, e o systemd as ignora sem avisar. @chown volta à lista porque o
+# Node chama fchown ao copiar arquivos (o backup copia as capas).
 HARDENING='NoNewPrivileges=yes
 UMask=0077
 RestrictSUIDSGID=yes
@@ -150,6 +151,7 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+SystemCallFilter=@chown
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX'
 
 escrever_units() {

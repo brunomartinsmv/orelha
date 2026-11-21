@@ -61,6 +61,8 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
 
 O Orelha roda em **um só computador** (o servidor), que guarda o único banco de dados. Os outros aparelhos (celular, outro notebook) são clientes: abrem o endereço da tailnet no navegador ou como PWA e não instalam nada. Rodar o servidor em dois computadores criaria dois bancos separados, sem sincronização.
 
+> **Já tem o Orelha rodando nesse computador?** Não clone de novo: os dados ficam em `data/` dentro da instalação atual, e um clone novo começa vazio. Entre na pasta que já existe e rode `scripts/servico-linux.sh atualizar` (ou `scripts/servico.sh atualizar` no macOS). O `instalar` recusa seguir quando percebe esse caso.
+
 1. No computador que vai servir, faça um clone fixo (por exemplo `~/orelha`, não um worktree: os dados ficam em `data/` dentro dele) e crie a configuração a partir do modelo:
 
    ```sh
@@ -87,7 +89,8 @@ O Orelha roda em **um só computador** (o servidor), que guarda o único banco d
    | --- | --- |
    | `verificar` | confere Node 24+, Tailscale, `config.json` e testes, sem mudar nada |
    | `instalar` | verifica, registra o serviço, espera o servidor responder e ativa HTTPS na porta `publicPort` |
-   | `atualizar` | `git pull --ff-only`, verificações, reinício e conferência da versão no ar |
+   | `atualizar` | testa a versão nova numa cópia à parte, faz backup, avança o branch e reinicia; se a versão nova não subir, volta para a anterior |
+   | `backup` | copia o banco e as capas enviadas para fora do projeto (o `instalar` já liga um backup diário) |
    | `reiniciar` | reinicia e confere se o servidor voltou |
    | `status` | estado do processo, versão no ar e `tailscale serve` |
    | `logs` | acompanha o log do servidor |
@@ -124,11 +127,12 @@ Para lançar uma versão:
 1. Mova as entradas de **[Não publicado]** no [CHANGELOG.md](CHANGELOG.md) para uma nova seção com número e data.
 2. Atualize `version` no `package.json`; é a única fonte da versão (o `User-Agent` e o `/api/health` a leem dali).
 3. Se a lista de arquivos do app mudou, ajuste `SHELL_FILES` e suba `VERSION` em `public/sw.js`.
-4. Faça o commit, crie a tag (`git tag v1.2.3`) e envie com `git push --follow-tags`.
+4. Faça o commit, crie a tag anotada (`git tag -a v1.2.3 -m v1.2.3`) e envie com `git push --follow-tags`. Uma tag leve, sem `-a`, não vai junto.
 
 ### Modelo de segurança e funcionamento offline
 
 - **Validação de origem e dispositivo:** requisições vindas do `tailscale serve` recebem o IP real do cliente no final de `X-Forwarded-For`; aparelhos fora de `allowedDevices`, `Host` desconhecidos (proteção contra *DNS rebinding*) ou escritas de outras origens recebem `403 Forbidden`.
+- **Backups:** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Continuam no mesmo disco: para sobreviver a uma pane, copie essa pasta para outro lugar.
 - **Leitura com o servidor dormindo:** o Service Worker mantém a interface e a última cópia das respostas da API e capas em cache. Se o computador estiver em repouso, o app abre normalmente no celular em modo somente leitura.
 
 ---
