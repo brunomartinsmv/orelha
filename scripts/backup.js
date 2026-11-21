@@ -24,7 +24,10 @@ mkdirSync(destino, { recursive: true, mode: 0o700 });
 const carimbo = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
 const final = join(destino, `orelha-${carimbo}`);
 const parcial = `${final}.parcial`;
-rmSync(parcial, { recursive: true, force: true });
+// Sobras de um backup interrompido no meio.
+for (const nome of readdirSync(destino)) {
+  if (nome.endsWith('.parcial')) rmSync(join(destino, nome), { recursive: true, force: true });
+}
 mkdirSync(join(parcial, 'covers'), { recursive: true });
 
 // A API de backup do SQLite copia com o servidor rodando, sem pegar o banco no meio de uma escrita.
