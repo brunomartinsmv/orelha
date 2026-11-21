@@ -13,6 +13,7 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - `scripts/servico.sh verificar`: confere Node 24+, Tailscale conectado, `config.json` preenchido e testes passando, sem mudar nada.
 - `scripts/servico.sh atualizar`: puxa o branch atual (`git pull --ff-only`), roda as verificações e reinicia o serviço; recusa seguir com alterações não commitadas.
 - `scripts/servico.sh reiniciar` e `scripts/servico.sh logs`.
+- `scripts/servico-linux.sh`, com os mesmos comandos, para servir pelo Linux com um serviço de usuário do systemd: liga o linger para subir no boot sem login e exige que o usuário seja operador do Tailscale.
 - `/api/health` passa a informar a versão em execução.
 
 ### Modificado
