@@ -7,6 +7,7 @@ import { COVERS_DIR, db, setSetting } from './db.js';
 import * as lib from './library.js';
 import { HttpError } from './library.js';
 import { importCsv } from './importers.js';
+import { USER_AGENT, VERSION } from './version.js';
 
 const PUBLIC_DIR = join(import.meta.dirname, '..', 'public');
 const MAX_JSON = 1 * 1024 * 1024;
@@ -68,7 +69,8 @@ export function createApp(config) {
     return n;
   };
 
-  route('GET', '/api/health', () => ({ ok: true }));
+  // O pid deixa os scripts de serviço confirmarem que quem responde é o processo que acabaram de subir.
+  route('GET', '/api/health', () => ({ ok: true, version: VERSION, pid: process.pid }));
   route('GET', '/api/search', ({ query }) => lib.search(query.get('q')));
   route('GET', '/api/home', () => lib.home());
   route('GET', '/api/discover', () => lib.discover());
@@ -250,7 +252,7 @@ function sendImage(res, path, status = 200) {
 async function downloadCover(kind, value, size, target) {
   const url = `https://covers.openlibrary.org/b/${kind}/${value}-${size}.jpg?default=false`;
   const upstream = await fetch(url, {
-    headers: { 'User-Agent': 'Orelha/1.0 (personal reading diary)' },
+    headers: { 'User-Agent': USER_AGENT },
     signal: AbortSignal.timeout(20_000),
   });
   if (!upstream.ok) return false;

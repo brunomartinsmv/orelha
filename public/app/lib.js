@@ -13,7 +13,7 @@ function setOffline(value) {
 
 export async function api(path, { method = 'GET', body, raw, signal } = {}) {
   let res;
-  // Com o Mac dormindo o Tailscale não recusa a conexão, ela só fica pendurada: precisa de prazo.
+  // Com o servidor fora do ar o Tailscale não recusa a conexão, ela só fica pendurada: precisa de prazo.
   const deadline = AbortSignal.timeout(raw ? 120_000 : 25_000);
   try {
     res = await fetch(`/api${path}`, {
@@ -25,7 +25,7 @@ export async function api(path, { method = 'GET', body, raw, signal } = {}) {
   } catch (err) {
     if (err.name === 'AbortError') throw err;
     setOffline(true);
-    throw new Error('Sem conexão com o Mac. Ele está acordado e no Tailscale?');
+    throw new Error('Sem conexão com o servidor. Ele está ligado e o Tailscale conectado?');
   }
   setOffline(res.headers.get('X-Orelha-Offline') === '1');
   const data = await res.json().catch(() => null);

@@ -68,7 +68,9 @@ async function rawGet(path, headers) {
 }
 
 test('aceita o Mac e o iPhone (IPv6) vindos da tailnet', async () => {
-  assert.equal((await call('GET', '/health', undefined, { 'X-Forwarded-For': MAC })).status, 200);
+  const health = await call('GET', '/health', undefined, { 'X-Forwarded-For': MAC });
+  assert.equal(health.status, 200);
+  assert.equal(health.json.pid, process.pid);
   assert.equal((await call('GET', '/health', undefined, { 'X-Forwarded-For': IPHONE_V6 })).status, 200);
 });
 

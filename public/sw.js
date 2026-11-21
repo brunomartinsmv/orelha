@@ -1,4 +1,4 @@
-// Mantém o app abrindo e mostrando a última cópia dos dados quando o Mac está dormindo.
+// Mantém o app abrindo e mostrando a última cópia dos dados quando o servidor está fora do ar.
 const VERSION = 'orelha-v7';
 const SHELL = `${VERSION}-shell`;
 const DATA = `${VERSION}-data`;
@@ -27,7 +27,7 @@ self.addEventListener('activate', (event) => {
   })());
 });
 
-// Rede primeiro, com prazo: sem o Mac, o Tailscale deixa a requisição pendurada em vez de falhar.
+// Rede primeiro, com prazo: sem o servidor, o Tailscale deixa a requisição pendurada em vez de falhar.
 async function networkFirst(request, cacheName, timeoutMs, cacheKey = request) {
   const cache = await caches.open(cacheName);
   const network = fetch(request).then((res) => {
@@ -37,7 +37,7 @@ async function networkFirst(request, cacheName, timeoutMs, cacheKey = request) {
   const cached = await cache.match(cacheKey);
   if (!cached) return network;
   const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
-  // Servidor fora do ar responde 502 pelo Tailscale: isso também conta como "sem Mac".
+  // Servidor fora do ar responde 502 pelo Tailscale: isso também conta como "sem servidor".
   const usable = network.then((res) => (res.status >= 500 ? null : res)).catch(() => null);
   const winner = await Promise.race([usable, timeout]);
   if (winner) return winner;

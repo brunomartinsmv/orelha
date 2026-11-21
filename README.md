@@ -30,7 +30,7 @@ Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no 
 ## Requisitos
 
 - **Node.js 24 ou superior** (utiliza o módulo nativo `node:sqlite` — não há `node_modules` nem `npm install`).
-- *(Opcional)* **Tailscale** no Mac e no celular para acesso remoto via HTTPS restrito à sua tailnet.
+- *(Opcional)* **Tailscale** no computador servidor (macOS ou Linux) e nos aparelhos clientes, para acesso remoto via HTTPS restrito à sua tailnet.
 
 ---
 
@@ -55,17 +55,21 @@ npm test         # executa a suíte de testes automatizados
 
 ---
 
-## Acesso pela Tailnet (Mac + iPhone)
+## Acesso pela Tailnet
 
 O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do celular sem expor nada à internet pública, o projeto usa o `tailscale serve` com HTTPS aliado a uma lista explícita de dispositivos permitidos.
 
-1. Crie seu arquivo de configuração a partir do modelo:
+O Orelha roda em **um só computador** (o servidor), que guarda o único banco de dados. Os outros aparelhos (celular, outro notebook) são clientes: abrem o endereço da tailnet no navegador ou como PWA e não instalam nada. Rodar o servidor em dois computadores criaria dois bancos separados, sem sincronização.
+
+> **Já tem o Orelha rodando nesse computador?** Não clone de novo: os dados ficam em `data/` dentro da instalação atual, e um clone novo começa vazio. Entre na pasta que já existe e rode `scripts/servico-linux.sh atualizar` (ou `scripts/servico.sh atualizar` no macOS). O `instalar` recusa seguir quando percebe esse caso.
+
+1. No computador que vai servir, faça um clone fixo (por exemplo `~/orelha`, não um worktree: os dados ficam em `data/` dentro dele) e crie a configuração a partir do modelo:
 
    ```sh
    cp config.example.json config.json
    ```
 
-2. Edite o `config.json` com o domínio da sua máquina na tailnet e os IPs Tailscale (IPv4 e/ou IPv6) de cada aparelho autorizado. Você pode consultá-los rodando `tailscale status --json`:
+2. Edite o `config.json` com o domínio da máquina servidora na tailnet e os IPs Tailscale (IPv4 e/ou IPv6) de cada aparelho autorizado, incluindo outros computadores que vão abrir o Orelha. Você pode consultá-los rodando `tailscale status --json`:
 
    ```json
    {
@@ -79,20 +83,57 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
    }
    ```
 
-3. No macOS, instale o serviço em segundo plano (`LaunchAgent` + publicação no `tailscale serve`):
+3. Instale o serviço em segundo plano. Os dois scripts têm os mesmos comandos:
+
+   | Comando | O que faz |
+   | --- | --- |
+   | `verificar` | confere Node 24+, Tailscale, `config.json` e testes, sem mudar nada |
+   | `instalar` | verifica, registra o serviço, espera o servidor responder e ativa HTTPS na porta `publicPort` |
+   | `atualizar` | testa a versão nova numa cópia à parte, faz backup, avança o branch e reinicia; se a versão nova não subir, volta para a anterior |
+   | `backup` | copia o banco e as capas enviadas para fora do projeto (o `instalar` já liga um backup diário) |
+   | `reiniciar` | reinicia e confere se o servidor voltou |
+   | `status` | estado do processo, versão no ar e `tailscale serve` |
+   | `logs` | acompanha o log do servidor |
+   | `remover` | desativa o serviço (seus dados em `data/` são preservados) |
+
+   **macOS** (LaunchAgent, log em `data/orelha.log`):
 
    ```sh
-   scripts/servico.sh instalar   # registra o LaunchAgent e ativa HTTPS na porta publicPort
-   scripts/servico.sh status     # verifica estado do processo e do tailscale serve
-   scripts/servico.sh remover    # desativa o serviço (seus dados em data/ são preservados)
+   scripts/servico.sh instalar
    ```
 
+   **Linux** (serviço de usuário do systemd, log no `journalctl`):
+
+   ```sh
+   sudo tailscale set --operator=$USER   # uma vez: deixa seu usuário configurar o tailscale serve sem sudo
+   scripts/servico-linux.sh instalar     # também liga o linger, para o Orelha subir no boot sem login
+   ```
+
+   Num notebook servindo o Orelha, impeça que ele suspenda ao fechar a tampa: em `/etc/systemd/logind.conf`, defina `HandleLidSwitch=ignore` e `HandleLidSwitchExternalPower=ignore`, e depois rode `sudo systemctl restart systemd-logind`.
+
 4. Abra `https://<tailnetHost>:<publicPort>` no Safari do iPhone e use **Compartilhar → Adicionar à Tela de Início** para usá-lo como aplicativo nativo.
+
+### Atualizando e lançando versões
+
+Para levar uma nova versão ao computador que serve o Orelha:
+
+```sh
+scripts/servico.sh atualizar        # macOS
+scripts/servico-linux.sh atualizar  # Linux
+```
+
+Para lançar uma versão:
+
+1. Mova as entradas de **[Não publicado]** no [CHANGELOG.md](CHANGELOG.md) para uma nova seção com número e data.
+2. Atualize `version` no `package.json`; é a única fonte da versão (o `User-Agent` e o `/api/health` a leem dali).
+3. Se a lista de arquivos do app mudou, ajuste `SHELL_FILES` e suba `VERSION` em `public/sw.js`.
+4. Faça o commit, crie a tag anotada (`git tag -a v1.2.3 -m v1.2.3`) e envie com `git push --follow-tags`. Uma tag leve, sem `-a`, não vai junto.
 
 ### Modelo de segurança e funcionamento offline
 
 - **Validação de origem e dispositivo:** requisições vindas do `tailscale serve` recebem o IP real do cliente no final de `X-Forwarded-For`; aparelhos fora de `allowedDevices`, `Host` desconhecidos (proteção contra *DNS rebinding*) ou escritas de outras origens recebem `403 Forbidden`.
-- **Leitura com o computador dormindo:** o Service Worker mantém a interface e a última cópia das respostas da API e capas em cache. Se o computador estiver em repouso, o app abre normalmente no celular em modo somente leitura.
+- **Backups:** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Para ter uma cópia fora do computador, configure um remoto no [rclone](https://rclone.org) (ex.: Google Drive com `scope = drive.file`) e ponha `"backupRemoto": "gdrive:Orelha/backups"` no `config.json`: cada backup diário espelha a pasta lá.
+- **Leitura com o servidor dormindo:** o Service Worker mantém a interface e a última cópia das respostas da API e capas em cache. Se o computador estiver em repouso, o app abre normalmente no celular em modo somente leitura.
 
 ---
 
@@ -107,9 +148,11 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
 ## Estrutura do projeto
 
 ```text
+├── CHANGELOG.md             # Histórico de versões (Keep a Changelog)
 ├── config.example.json      # Modelo de configuração de portas e IPs da tailnet
 ├── server/
 │   ├── index.js             # Ponto de entrada (escuta apenas em 127.0.0.1)
+│   ├── version.js           # Versão lida do package.json (User-Agent e /api/health)
 │   ├── app.js               # Roteador HTTP, controle de acesso, upload e cache de capas
 │   ├── db.js                # Esquema SQLite nativo (node:sqlite) e transações
 │   ├── library.js           # Regras de domínio: estante, diário, listas, metas e estatísticas
@@ -125,6 +168,7 @@ O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do cel
 ├── scripts/
 │   ├── seed-demo.js         # Popula dados de demonstração
 │   ├── import-home-catalogue.js # Utilitário de importação de catálogo JSON em lote
-│   └── servico.sh           # Gerenciador de LaunchAgent + tailscale serve no macOS
+│   ├── servico.sh           # Implantação no macOS: LaunchAgent, tailscale serve, atualização
+│   └── servico-linux.sh     # Implantação no Linux: systemd de usuário, tailscale serve, atualização
 └── test/                    # Testes automatizados com node:test
 ```
