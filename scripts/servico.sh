@@ -25,6 +25,8 @@ TAILSCALE="$(command -v tailscale || true)"
 if [ -z "$TAILSCALE" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
   TAILSCALE=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 fi
+# O launchd roda o backup diário com um PATH mínimo, sem o /opt/homebrew/bin; o plist leva o caminho completo.
+RCLONE="$(command -v rclone || true)"
 
 [ -f "$PROJECT/config.json" ] || falha "config.json não encontrado. Copie config.example.json para config.json e configure sua tailnet."
 config() { "$NODE" -e 'const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(c[process.argv[2]] ?? "")' "$PROJECT/config.json" "$1"; }
@@ -132,7 +134,8 @@ checar_porta() {
 xml() { local s="$1"; s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; print -r -- "$s"; }
 
 escrever_plists() {
-  local dir="$1" node="$(xml "$NODE")" projeto="$(xml "$PROJECT")" log="$(xml "$LOG")"
+  local dir="$1" node="$(xml "$NODE")" projeto="$(xml "$PROJECT")" log="$(xml "$LOG")" ambiente=""
+  [ -z "$RCLONE" ] || ambiente="<key>EnvironmentVariables</key><dict><key>ORELHA_RCLONE</key><string>$(xml "$RCLONE")</string></dict>"
   cat > "$dir/$LABEL.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -166,6 +169,7 @@ PLIST
     <string>$node</string>
     <string>$projeto/scripts/backup.js</string>
   </array>
+  $ambiente
   <key>WorkingDirectory</key><string>$projeto</string>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
   <key>ProcessType</key><string>Background</string>

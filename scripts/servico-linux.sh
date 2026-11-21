@@ -18,6 +18,8 @@ ok() { echo "✓ $*"; }
 NODE="$(command -v node || true)"
 [ -n "$NODE" ] || falha "Node.js não encontrado no PATH. Instale o Node $NODE_MIN ou superior."
 TAILSCALE="$(command -v tailscale || true)"
+# O systemd roda o backup diário com um PATH mínimo; a unit leva o caminho completo do rclone (vazio: procura no PATH).
+RCLONE="$(command -v rclone || true)"
 
 [ -f "$PROJECT/config.json" ] || falha "config.json não encontrado. Copie config.example.json para config.json e configure sua tailnet."
 config() { "$NODE" -e 'const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(c[process.argv[2]] ?? "")' "$PROJECT/config.json" "$1"; }
@@ -178,6 +180,7 @@ Description=Orelha, backup diário do banco
 [Service]
 Type=oneshot
 ExecStart="$NODE" "$PROJECT/scripts/backup.js"
+Environment="ORELHA_RCLONE=$RCLONE"
 WorkingDirectory=$PROJECT
 Nice=10
 $HARDENING
