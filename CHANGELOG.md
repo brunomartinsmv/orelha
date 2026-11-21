@@ -15,7 +15,7 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - `scripts/servico.sh reiniciar` e `scripts/servico.sh logs`.
 - `scripts/servico-linux.sh`, com os mesmos comandos, para servir pelo Linux com um serviço de usuário do systemd: liga o linger para subir no boot sem login e exige que o usuário seja operador do Tailscale.
 - `/api/health` passa a informar a versão e o pid em execução.
-- `scripts/backup.js` e o comando `backup` dos dois scripts: copiam o banco (pela API de backup do SQLite, com o servidor rodando) e as capas enviadas para fora da pasta do projeto, conferem a integridade da cópia e guardam as últimas 30. `instalar` liga um backup diário (timer do systemd no Linux, LaunchAgent às 4h no macOS).
+- `scripts/backup.js` e o comando `backup` dos dois scripts: copiam o banco (pela API de backup do SQLite, com o servidor rodando) e as capas enviadas para fora da pasta do projeto, conferem a integridade da cópia e guardam as últimas 30. Com `backupRemoto` no `config.json`, espelham a pasta num remoto do rclone, como o Google Drive. `instalar` liga um backup diário (timer do systemd no Linux, LaunchAgent às 4h no macOS).
 
 ### Modificado
 

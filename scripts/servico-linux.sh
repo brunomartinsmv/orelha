@@ -268,7 +268,7 @@ atualizar() {
     || falha "Os testes da versão nova (${alvo:0:7}) falharam; nada foi mudado. Rode 'npm test' num clone dela para ver o motivo."
   ok "Testes da versão nova passaram"
 
-  copia="$("$NODE" "$PROJECT/scripts/backup.js")" || falha "O backup falhou; atualização cancelada, nada foi mudado."
+  copia="$(ORELHA_BACKUP_REMOTO= "$NODE" "$PROJECT/scripts/backup.js")" || falha "O backup falhou; atualização cancelada, nada foi mudado."
   echo "$copia"
   copia="${copia#*Backup em }"; copia="${copia%% (*}"
   versao_antes="$(versao_local)"

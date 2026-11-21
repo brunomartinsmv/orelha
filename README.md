@@ -132,7 +132,7 @@ Para lançar uma versão:
 ### Modelo de segurança e funcionamento offline
 
 - **Validação de origem e dispositivo:** requisições vindas do `tailscale serve` recebem o IP real do cliente no final de `X-Forwarded-For`; aparelhos fora de `allowedDevices`, `Host` desconhecidos (proteção contra *DNS rebinding*) ou escritas de outras origens recebem `403 Forbidden`.
-- **Backups:** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Continuam no mesmo disco: para sobreviver a uma pane, copie essa pasta para outro lugar.
+- **Backups:** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Para ter uma cópia fora do computador, configure um remoto no [rclone](https://rclone.org) (ex.: Google Drive com `scope = drive.file`) e ponha `"backupRemoto": "gdrive:Orelha/backups"` no `config.json`: cada backup diário espelha a pasta lá.
 - **Leitura com o servidor dormindo:** o Service Worker mantém a interface e a última cópia das respostas da API e capas em cache. Se o computador estiver em repouso, o app abre normalmente no celular em modo somente leitura.
 
 ---

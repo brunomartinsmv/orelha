@@ -2,6 +2,7 @@
 // Uso: node scripts/backup.js [pasta-de-destino]   (padrão: ORELHA_BACKUP_DIR ou a pasta de dados do usuário)
 // Guarda as últimas ORELHA_BACKUP_MANTER cópias (padrão 30) e confere cada uma antes de apagar as antigas.
 // Com "backupRemoto" no config.json (ou ORELHA_BACKUP_REMOTO), espelha a pasta num remoto do rclone, ex. "gdrive:Orelha/backups".
+// ORELHA_BACKUP_REMOTO vazio pula o envio (o atualizar faz isso para não esperar a rede).
 import { backup, DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
