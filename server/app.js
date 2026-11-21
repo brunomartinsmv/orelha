@@ -69,7 +69,8 @@ export function createApp(config) {
     return n;
   };
 
-  route('GET', '/api/health', () => ({ ok: true, version: VERSION }));
+  // O pid deixa os scripts de serviço confirmarem que quem responde é o processo que acabaram de subir.
+  route('GET', '/api/health', () => ({ ok: true, version: VERSION, pid: process.pid }));
   route('GET', '/api/search', ({ query }) => lib.search(query.get('q')));
   route('GET', '/api/home', () => lib.home());
   route('GET', '/api/discover', () => lib.discover());
