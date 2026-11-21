@@ -23,8 +23,13 @@ if (!existsSync(banco)) {
 
 process.umask(0o077);
 mkdirSync(destino, { recursive: true, mode: 0o700 });
-const carimbo = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
-const final = join(destino, `orelha-${carimbo}`);
+const nomeAgora = () => join(destino, `orelha-${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}`);
+let final = nomeAgora();
+// Dois backups no mesmo segundo (o do atualizar e o do timer, por exemplo) teriam o mesmo nome.
+while (existsSync(final)) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+  final = nomeAgora();
+}
 const parcial = `${final}.parcial`;
 // Sobras de um backup interrompido no meio.
 for (const nome of readdirSync(destino)) {
