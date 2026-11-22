@@ -778,8 +778,12 @@ export function importOrelhaJson(data) {
         mergedListIds.add(match.id);
         if (srcKey !== null) listIdMap.set(srcKey, match.id);
       } else {
-        const { lastInsertRowid } = db.prepare(`INSERT INTO lists (title, description, ranked, demo, created_at)
-          VALUES (?, ?, ?, ?, COALESCE(?, datetime('now')))`).run(title, desc, ranked, demo, createdAt);
+        const idFree = srcInt && !db.prepare('SELECT 1 FROM lists WHERE id = ?').get(srcInt);
+        const { lastInsertRowid } = idFree
+          ? db.prepare(`INSERT INTO lists (id, title, description, ranked, demo, created_at)
+              VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`).run(srcInt, title, desc, ranked, demo, createdAt)
+          : db.prepare(`INSERT INTO lists (title, description, ranked, demo, created_at)
+              VALUES (?, ?, ?, ?, COALESCE(?, datetime('now')))`).run(title, desc, ranked, demo, createdAt);
         const newListId = Number(lastInsertRowid);
         usedListIds.add(newListId);
         if (srcKey !== null) listIdMap.set(srcKey, newListId);

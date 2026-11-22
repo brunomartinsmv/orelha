@@ -833,4 +833,11 @@ Mesmo Título,Autora X,9788500000702,2025/05/10,read,5,Resenha Ed2
   assert.equal(allSame.length, 2);
   const recreated = (await call('GET', `/lists/${allSame.find((l) => l.id !== lb.id).id}`)).json;
   assert.deepEqual(recreated.books.map((b) => b.id), [itemA.id]);
+
+  // Em banco vazio com IDs de lista > 1 (ex.: 2 e 3), repetir a restauração preserva os IDs e não mistura itens.
+  db.exec(`DELETE FROM list_items; DELETE FROM lists; DELETE FROM sqlite_sequence WHERE name = 'lists';`);
+  await call('POST', '/import', JSON.stringify(listsBackup));
+  await call('POST', '/import', JSON.stringify(listsBackup));
+  assert.deepEqual((await call('GET', `/lists/${la.id}`)).json.books.map((b) => b.id), [itemA.id]);
+  assert.deepEqual((await call('GET', `/lists/${lb.id}`)).json.books.map((b) => b.id), [itemB.id]);
 });
