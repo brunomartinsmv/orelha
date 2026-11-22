@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orelha — Um lugar quieto para os seus livros</title>
+  <meta name="description" content="Diário de leitura pessoal e estante virtual auto-hospedada. Node.js 24+, zero dependências, SQLite local, PWA offline e acesso privado via Tailscale." />
+  <meta property="og:title" content="Orelha — Um lugar quieto para os seus livros" />
+  <meta property="og:description" content="Estante de lombadas 3D, diário de leitura, retrospectiva anual e modo offline — rodando no seu próprio computador." />
+  <meta property="og:image" content="./docs/estante.png" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script>
+    (() => {
+      const saved = localStorage.getItem('orelha-site:theme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+    })();
+  </script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="#topo" aria-label="Orelha">
+        <svg viewBox="0 0 28 24" fill="none" aria-hidden="true">
+          <path d="M3.4 4.2C6.7 3.5 10.3 4 12.9 5.8v14.6c-2.6-1.5-6.2-2-9.5-1.4a1.2 1.2 0 0 1-1.4-1.2V5.4c0-.6.5-1.1 1.4-1.2Z" fill="currentColor" opacity=".82"/>
+          <path d="M15.1 5.8c1.3-.9 2.8-1.5 4.4-1.7v4.3c0 1.2 1 2.2 2.2 2.2h4.3v7.2c0 .7-.6 1.3-1.4 1.2-3.3-.6-6.9-.1-9.5 1.4V5.8Z" fill="currentColor"/>
+          <path d="M21.2 4.3c0-.2.3-.3.5-.2l4.1 4.1c.1.2 0 .5-.2.5h-3.2c-.7 0-1.2-.5-1.2-1.2V4.3Z" fill="var(--brass)"/>
+        </svg>
+        <span>orelha</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Navegação">
+        <a href="#recursos" class="hide-sm">Recursos</a>
+        <a href="#como-rodar" class="hide-sm">Como rodar</a>
+        <a href="https://github.com/brunomartinsmv/orelha" target="_blank" rel="noreferrer">GitHub</a>
+        <button type="button" class="theme-btn" id="theme-toggle" aria-label="Alternar tema claro e escuro" title="Alternar tema">
+          <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>
+          </svg>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="topo">
+    <section class="hero">
+      <div class="wrap">
+        <div class="kicker">
+          <span class="kicker-dot" aria-hidden="true"></span>
+          Auto-hospedado · Node.js 24+ · Zero dependências
+        </div>
+        <h1>Um lugar quieto para os seus livros.</h1>
+        <p class="hero-sub">
+          Diário de leitura pessoal e estante virtual sem rede social, sem anúncios e sem nuvem de terceiros.
+          Roda no seu computador com SQLite nativo e acompanha você no celular pela sua rede privada Tailscale — mesmo offline.
+        </p>
+        <div class="cta-row">
+          <a class="btn primary" href="https://github.com/brunomartinsmv/orelha" target="_blank" rel="noreferrer">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.24c0 4.52 2.87 8.36 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.05 1.53 1.05.9 1.57 2.35 1.12 2.92.86.09-.67.35-1.12.64-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.3.1-2.72 0 0 .84-.28 2.75 1.05a9.35 9.35 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.42.2 2.46.1 2.72.64.72 1.03 1.64 1.03 2.76 0 3.94-2.34 4.81-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.22 10.22 0 0 0 22 12.24C22 6.58 17.52 2 12 2Z"/></svg>
+            Ver no GitHub
+          </a>
+          <a class="btn" href="#como-rodar">Rodar localmente</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="stage-section" aria-label="Demonstração em vídeo">
+      <div class="wrap">
+        <div class="video-frame">
+          <video id="demo-video" autoplay muted loop playsinline controls preload="metadata">
+            <source src="./docs/demo.mp4#t=0.001" type="video/mp4" />
+          </video>
+        </div>
+        <p class="stage-caption">
+          Início com leitura atual e epígrafe diária, estante de lombadas 3D, ordenação por cor, modo escuro e Retrospectiva do ano.
+        </p>
+      </div>
+    </section>
+
+    <div class="wrap"><div class="plank-divider" aria-hidden="true"></div></div>
+
+    <section class="section" id="recursos">
+      <div class="wrap">
+        <div class="section-head">
+          <div class="section-kicker">Feito para leitores</div>
+          <h2>Seus livros tratados como objetos, não como feed.</h2>
+          <p>
+            Cada detalhe do Orelha existe para tornar o registro de leitura calmo, tátil e duradouro — do peso visual de uma lombada à altura física de um ano inteiro de páginas.
+          </p>
+        </div>
+
+        <div class="showcase-list">
+          <article class="showcase-row">
+            <div class="showcase-copy">
+              <h3>Uma estante que responde ao olhar</h3>
+              <p>
+                Cada livro ganha lombada proporcional ao número de páginas, cor extraída da capa e tipografia escolhida pelo gênero literário. Clique em qualquer título para tirá-lo da prateleira em 3D e reler suas anotações ao lado.
+              </p>
+              <ul class="pill-list">
+                <li>Lombadas proporcionais</li>
+                <li>Abertura 3D</li>
+                <li>Ordenação por cor</li>
+                <li>Notas de ½ a 5 estrelas</li>
+                <li>Spoilers ocultáveis</li>
+              </ul>
+            </div>
+            <div class="shot">
+              <img src="./docs/livro.png" alt="Página de Torto Arado no Orelha em modo escuro" loading="lazy" />
+            </div>
+          </article>
+
+          <article class="showcase-row reverse">
+            <div class="showcase-copy">
+              <h3>Números da leitura e A pilha</h3>
+              <p>
+                Veja quantos centímetros de papel suas leituras empilhariam na mesa, alterne entre livros e páginas, explore gêneros, formatos, décadas e abra o modo <strong>Retrospectiva</strong> para revisitar qualquer ano.
+              </p>
+              <ul class="pill-list">
+                <li>A pilha física em papel</li>
+                <li>Retrospectiva anual</li>
+                <li>Livros &amp; páginas</li>
+                <li>Papel, e-book e áudio</li>
+              </ul>
+            </div>
+            <div class="shot">
+              <img src="./docs/numeros.png" alt="Tela de Números da leitura com A pilha em modo escuro" loading="lazy" />
+            </div>
+          </article>
+
+          <article class="showcase-row">
+            <div class="showcase-copy">
+              <h3>No bolso, mesmo com o computador dormindo</h3>
+              <p>
+                Instale como PWA no iPhone ou Android pela sua rede privada Tailscale. O Service Worker mantém estante e capas em cache e uma fila local em IndexedDB sincroniza páginas, trechos e status assim que o servidor acordar.
+              </p>
+              <ul class="pill-list">
+                <li>PWA instalável</li>
+                <li>Fila offline em IndexedDB</li>
+                <li>HTTPS privado via Tailscale</li>
+                <li>Importa Skoob, Goodreads e StoryGraph</li>
+              </ul>
+            </div>
+            <div class="phone-pair">
+              <div class="phone-card">
+                <img src="./docs/mobile-estante.png" alt="Estante de lombadas do Orelha no celular" loading="lazy" />
+              </div>
+              <div class="phone-card">
+                <img src="./docs/mobile-voce.png" alt="Perfil e 4 livros favoritos no celular" loading="lazy" />
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-label="Arquitetura e privacidade">
+      <div class="wrap">
+        <div class="pillars">
+          <div class="pillar">
+            <h3>Zero dependências</h3>
+            <p>Usa apenas Node.js 24+ com <code>node:sqlite</code> nativo e Preact + htm em ES Modules. Sem <code>npm install</code>, sem etapa de build, sem quebra de pacotes.</p>
+          </div>
+          <div class="pillar">
+            <h3>Privado por desenho</h3>
+            <p>O servidor escuta só em <code>127.0.0.1</code>, aceita apenas os IPs Tailscale autorizados e guarda todo o histórico localmente em <code>data/orelha.sqlite</code>.</p>
+          </div>
+          <div class="pillar">
+            <h3>Portabilidade total</h3>
+            <p>Importe seu histórico do Skoob, Goodreads ou StoryGraph, faça backup diário automático (com espelho opcional via rclone) e exporte em CSV ou JSON quando quiser.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="como-rodar">
+      <div class="wrap">
+        <div class="install-box">
+          <div>
+            <h2>Comece em um minuto</h2>
+            <p>
+              Só precisa de <strong>Node.js 24+</strong>. Rode o modo demonstração para explorar a estante cheia — um clique em <em>“Começar do zero”</em> limpa tudo depois.
+            </p>
+            <div class="cta-row" style="justify-content:flex-start">
+              <a class="btn primary" href="https://github.com/brunomartinsmv/orelha#acesso-pela-tailnet" target="_blank" rel="noreferrer">Guia da Tailnet &amp; serviço</a>
+            </div>
+          </div>
+
+          <div class="code-card">
+            <button type="button" class="copy-btn" id="copy-cmd">Copiar</button>
+<pre><code>git clone https://github.com/brunomartinsmv/orelha.git
+cd orelha
+
+npm run demo     <span class="cm"># livros e resenhas de exemplo</span>
+npm start        <span class="cm"># abre em http://localhost:4173</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>Orelha — seus livros, suas notas, seu banco SQLite.</span>
+      <div class="footer-links">
+        <a href="https://github.com/brunomartinsmv/orelha" target="_blank" rel="noreferrer">Repositório</a>
+        <a href="https://github.com/brunomartinsmv/orelha/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">Changelog</a>
+        <a href="https://github.com/brunomartinsmv/orelha/blob/main/README.md" target="_blank" rel="noreferrer">Documentação</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      // Tema claro / escuro
+      const root = document.documentElement;
+      const themeBtn = document.getElementById('theme-toggle');
+      const themeIcon = document.getElementById('theme-icon');
+      const sunPath = '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"/>';
+      const moonPath = '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>';
+      const isDark = () => {
+        const attr = root.getAttribute('data-theme');
+        if (attr) return attr === 'dark';
+        return matchMedia('(prefers-color-scheme: dark)').matches;
+      };
+      const syncThemeIcon = () => {
+        const dark = isDark();
+        themeIcon.innerHTML = dark ? sunPath : moonPath;
+        themeBtn.setAttribute('aria-label', dark ? 'Mudar para tema claro' : 'Mudar para tema escuro');
+      };
+      syncThemeIcon();
+      themeBtn.addEventListener('click', () => {
+        const next = isDark() ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        localStorage.setItem('orelha-site:theme', next);
+        syncThemeIcon();
+      });
+
+      // Botão copiar comandos
+      const copyBtn = document.getElementById('copy-cmd');
+      copyBtn.addEventListener('click', async () => {
+        const cmd = 'git clone https://github.com/brunomartinsmv/orelha.git\ncd orelha\nnpm run demo\nnpm start';
+        try {
+          await navigator.clipboard.writeText(cmd);
+          copyBtn.textContent = 'Copiado';
+          setTimeout(() => { copyBtn.textContent = 'Copiar'; }, 1800);
+        } catch {}
+      });
+    })();
+  </script>
+</body>
+</html>
