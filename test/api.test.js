@@ -667,3 +667,62 @@ test('restauração JSON preserva identidades distintas, favoritos sem estante, 
   assert.deepEqual(JSON.parse(enrichedRow.subjects), ['Terror']);
   assert.equal(enrichedRow.cover_id, 55);
 });
+
+test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos, edições pós-CSV, releitura e 13+ autores', async () => {
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+
+  // 1) Dois livros no backup com o mesmo ISBN, sendo que só o segundo (B) existe no destino.
+  const bookA = await newBook('Edição A', { authors: 'Autora A', isbn: '9788500000601' });
+  const bookB = await newBook('Edição B', { authors: 'Autora B', isbn: '9788500000601' });
+  await call('POST', `/books/${bookA.id}/logs`, { rating: 6, review: 'Resenha de A', finished_on: '2025-01-01' });
+  await call('POST', `/books/${bookB.id}/logs`, { rating: 10, review: 'Resenha de B', finished_on: '2025-02-01' });
+
+  // 2) Coletânea com 13 autores preservada no round-trip JSON e CSV.
+  const manyAuthors = Array.from({ length: 13 }, (_, i) => `Autora ${i + 1}`).join(', ');
+  const anthology = await newBook('Coletânea 13', { authors: manyAuthors });
+  await call('PUT', `/books/${anthology.id}/shelf`, { status: 'want' });
+
+  const backup = (await call('GET', '/export.json')).json;
+  // Remove A e coletânea, deixando apenas B no destino.
+  db.prepare('DELETE FROM books WHERE id IN (?, ?)').run(bookA.id, anthology.id);
+
+  const res = (await call('POST', '/import', JSON.stringify(backup))).json;
+  assert.equal(res.books_added, 2);
+  assert.equal((await call('GET', `/books/${bookA.id}`)).json.logs[0].review, 'Resenha de A');
+  assert.equal((await call('GET', `/books/${bookB.id}`)).json.logs.length, 1);
+  assert.equal((await call('GET', `/books/${bookB.id}`)).json.logs[0].review, 'Resenha de B');
+  assert.equal((await call('GET', `/books/${anthology.id}`)).json.book.authors.length, 13);
+  assert.equal((await call('POST', '/import', JSON.stringify(backup))).json.logs_added, 0);
+
+  // 3) Reimportar CSV do Goodreads após editar a nota localmente não duplica nem reverte a nota.
+  const gr = `Book Id,Title,Author,Additional Authors,ISBN,ISBN13,My Rating,Number of Pages,Year Published,Original Publication Year,Date Read,Bookshelves,Exclusive Shelf,My Review,Spoiler,Read Count
+9,Editado Local,Autora GR,,,,4,200,2020,2020,2025/03/01,,read,,,1
+`;
+  assert.equal((await call('POST', '/import', gr)).json.logs_added, 1);
+  const [grBook] = (await call('GET', '/shelf?status=read&q=Editado Local')).json;
+  const grPage = (await call('GET', `/books/${grBook.id}`)).json;
+  await call('PATCH', `/logs/${grPage.logs[0].id}`, { rating: 10, finished_on: '2025-03-01' });
+  assert.equal((await call('POST', '/import', gr)).json.logs_added, 0);
+  assert.equal((await call('GET', `/books/${grBook.id}`)).json.book.rating, 10);
+
+  // 4) Título em escrita não latina (japonês) sem ISBN não duplica ao reimportar.
+  const jp = `Title,Author,Bookshelves,Date Read\n新雪,藤沢周平,read,2025-04-01\n`;
+  assert.equal((await call('POST', '/import', jp)).json.books_added, 1);
+  const jpAgain = (await call('POST', '/import', jp)).json;
+  assert.equal(jpAgain.books_added, 0);
+  assert.equal(jpAgain.logs_added, 0);
+
+  // 5) Livro lido em 2021 e relido em 2026: CSV do Orelha não copia 2021 para shelf.started_on.
+  const rereadBook = await newBook('Releitura 2026', { isbn: '9788500000602' });
+  await call('POST', `/books/${rereadBook.id}/logs`, { rating: 8, started_on: '2021-01-05', finished_on: '2021-01-20' });
+  await call('PUT', `/books/${rereadBook.id}/shelf`, { status: 'reading', started_on: '2026-11-21' });
+  const rereadCsv = (await call('GET', '/export.csv')).text;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', rereadCsv);
+  const [restoredReread] = (await call('GET', '/shelf?status=reading&q=Releitura 2026')).json;
+  assert.notEqual(restoredReread.started_on, '2021-01-05');
+  assert.equal((await call('GET', `/books/${restoredReread.id}`)).json.logs[0].started_on, '2021-01-05');
+});

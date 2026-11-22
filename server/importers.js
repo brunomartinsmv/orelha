@@ -1,5 +1,5 @@
 // Importação de CSV (Skoob, Goodreads, StoryGraph, Orelha) e restauração de backup JSON do Orelha.
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { COVERS_DIR, db, transaction } from './db.js';
@@ -46,7 +46,7 @@ export function parseCsv(text) {
     .map((r) => Object.fromEntries(header.map((h, i) => [h.trim(), r[i] ?? ''])));
 }
 
-const norm = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const norm = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
 // Goodreads exporta ISBN como ="9781234567890".
 const cleanIsbn = (v) => {
@@ -316,21 +316,22 @@ export function importCsv(text) {
   const result = { format: name, total: rows.length, books_added: 0, logs_added: 0, skipped: 0 };
 
   transaction(() => {
-    // Snapshot dos logs anteriores à importação para fazer matching por multiplicidade
-    // (preserva releituras sem data em banco vazio e evita duplicar logs manuais).
+    // Snapshot dos logs anteriores à importação para fazer matching por import_key ou multiplicidade
+    // (preserva edições locais em registros importados, releituras sem data e logs manuais).
     const preexistingLogsByBook = new Map();
-    for (const row of db.prepare('SELECT id, book_id, finished_on, started_on, rating, review, reread, format FROM logs').all()) {
+    for (const row of db.prepare('SELECT id, book_id, finished_on, started_on, rating, review, reread, format, import_key FROM logs').all()) {
       const list = preexistingLogsByBook.get(row.book_id) || [];
       list.push(row);
       preexistingLogsByBook.set(row.book_id, list);
     }
     const usedLogIds = new Set();
+    const keyOccurrences = new Map();
 
     for (const row of rows) {
       const item = map(row);
       const title = item.title?.trim().slice(0, 300);
       if (!title) { result.skipped++; continue; }
-      const authors = (item.authors || []).map((a) => a.trim().slice(0, 120)).filter(Boolean).slice(0, 12);
+      const authors = (item.authors || []).map((a) => a.trim().slice(0, 120)).filter(Boolean);
       const review = item.review ? item.review.trim().slice(0, 20_000) : null;
       const finishedOn = item.finished_on;
       const startedOn = item.started_on && (!finishedOn || item.started_on <= finishedOn) ? item.started_on : null;
@@ -346,7 +347,10 @@ export function importCsv(text) {
       }
       db.prepare('INSERT INTO shelf (book_id) VALUES (?) ON CONFLICT(book_id) DO NOTHING').run(bookId);
       if (effectiveStatus || item.liked) {
-        const shelfStartedOn = effectiveStatus === 'reading' ? (startedOn || new Date().toLocaleDateString('en-CA')) : null;
+        // Quando a linha tem um registro de diário, startedOn pertence a esse registro e não à leitura em andamento.
+        const shelfStartedOn = effectiveStatus === 'reading'
+          ? ((!hasLog && startedOn) || new Date().toLocaleDateString('en-CA'))
+          : null;
         db.prepare(`UPDATE shelf SET
             status = COALESCE(status, ?),
             liked = MAX(liked, ?),
@@ -363,14 +367,21 @@ export function importCsv(text) {
           reread: item.reread ? 1 : 0,
           format: item.format ?? null,
         };
+        const baseKey = createHash('sha1').update(`${norm(title)}|${norm(authors[0] || '')}|${finishedOn || ''}`).digest('hex');
+        const occ = (keyOccurrences.get(baseKey) || 0) + 1;
+        keyOccurrences.set(baseKey, occ);
+        const importKey = occ === 1 ? baseKey : createHash('sha1').update(`${baseKey}#${occ}`).digest('hex');
+
         const candidates = preexistingLogsByBook.get(bookId) || [];
-        const match = candidates.find((c) => !usedLogIds.has(c.id) && sameLogContent(c, incoming));
+        const match = candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === importKey)
+          || candidates.find((c) => !usedLogIds.has(c.id) && sameLogContent(c, incoming));
         if (match) {
           usedLogIds.add(match.id);
         } else {
-          db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-            .run(bookId, incoming.finished_on, incoming.started_on, incoming.rating, incoming.review, item.spoilers ? 1 : 0, incoming.reread, incoming.format);
+          const safeKey = db.prepare('SELECT 1 FROM logs WHERE import_key = ?').get(importKey) ? null : importKey;
+          db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format, import_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(bookId, incoming.finished_on, incoming.started_on, incoming.rating, incoming.review, item.spoilers ? 1 : 0, incoming.reread, incoming.format, safeKey);
           result.logs_added++;
         }
       }
@@ -385,7 +396,7 @@ const VALID_FORMAT = new Set(['paper', 'ebook', 'audio']);
 const VALID_COVER_FILE = /^up-[0-9a-f-]+\.(jpg|png|webp)$/;
 const VALID_BOOK_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
 
-function parseJsonArray(v, { maxItem = 120, maxLen = 24 } = {}) {
+function parseJsonArray(v, { maxItem = 120, maxLen = Infinity } = {}) {
   const clean = (arr) => arr.map((x) => String(x ?? '').trim().slice(0, maxItem)).filter(Boolean).slice(0, maxLen);
   if (Array.isArray(v)) return clean(v);
   if (typeof v === 'string') {
@@ -447,6 +458,9 @@ export function importOrelhaJson(data) {
     const preexistingBooksByOl = new Map(preexistingBooks.filter((b) => b.ol_key).map((b) => [b.ol_key, b]));
     const preexistingBooksByIsbn = new Map(preexistingBooks.filter((b) => b.isbn).map((b) => [b.isbn, b]));
     const backupIds = new Set(data.books.map((b) => safeBookId(b?.id)).filter(Boolean));
+    const backupOlKeys = new Set(
+      data.books.map((b) => (typeof b?.ol_key === 'string' && b.ol_key.trim() ? b.ol_key.trim().slice(0, 40) : null)).filter(Boolean),
+    );
     const usedTargetBookIds = new Set();
     const bookIdMap = new Map();
 
@@ -465,7 +479,7 @@ export function importOrelhaJson(data) {
         continue;
       }
       const title = String(raw.title).trim().slice(0, 300);
-      const authors = parseJsonArray(raw.authors, { maxItem: 120, maxLen: 12 });
+      const authors = parseJsonArray(raw.authors, { maxItem: 120 });
       const subjects = parseJsonArray(raw.subjects, { maxItem: 60, maxLen: 24 });
       const isbn = cleanIsbn(raw.isbn);
       const olKey = typeof raw.ol_key === 'string' && raw.ol_key.trim() ? raw.ol_key.trim().slice(0, 40) : null;
@@ -483,17 +497,21 @@ export function importOrelhaJson(data) {
       const detailsAt = typeof raw.details_at === 'string' ? raw.details_at.trim().slice(0, 40) : null;
       const createdAt = safeTimestamp(raw.created_at);
 
-      // Só casa contra livros preexistentes e ainda não reclamados por outro livro deste backup.
+      // Só casa contra livros preexistentes ainda não reivindicados e que não pertençam (por ID/ol_key) a outro item do backup.
       let existing = null;
-      const takeIfFree = (row) => (row && !usedTargetBookIds.has(row.id) ? row : null);
-      if (oldId) existing = takeIfFree(preexistingBooksById.get(oldId));
-      if (!existing && olKey) existing = takeIfFree(preexistingBooksByOl.get(olKey));
+      const takeIfFree = (row, { allowReservedId = false, allowReservedOl = false } = {}) => {
+        if (!row || usedTargetBookIds.has(row.id)) return null;
+        if (!allowReservedId && backupIds.has(row.id) && row.id !== oldId) return null;
+        if (!allowReservedOl && row.ol_key && backupOlKeys.has(row.ol_key) && row.ol_key !== olKey) return null;
+        return row;
+      };
+      if (oldId) existing = takeIfFree(preexistingBooksById.get(oldId), { allowReservedId: true, allowReservedOl: true });
+      if (!existing && olKey) existing = takeIfFree(preexistingBooksByOl.get(olKey), { allowReservedOl: true });
       if (!existing && isbn) existing = takeIfFree(preexistingBooksByIsbn.get(isbn));
       if (!existing) {
         const firstAuthor = norm(authors[0] || '');
         existing = preexistingBooks.find((c) => {
-          if (usedTargetBookIds.has(c.id)) return false;
-          if (oldId && c.id !== oldId && backupIds.has(c.id)) return false;
+          if (!takeIfFree(c)) return false;
           if (isbn && c.isbn && isbn !== c.isbn) return false;
           return sameTitle(c.title, title) && norm(JSON.parse(c.authors || '[]')[0] || '') === firstAuthor;
         }) || null;
