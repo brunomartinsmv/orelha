@@ -980,7 +980,8 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.equal((await call('GET', '/stats?year=2021')).json.dropped, 1);
   assert.equal((await call('GET', '/stats?year=2023')).json.dropped, 1);
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM drops WHERE book_id = ?').get(legacyDrop.id).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM drops WHERE book_id = ? AND dropped_on IS NOT NULL').get(legacyDrop.id).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM drops WHERE book_id = ? AND dropped_on IS NULL').get(legacyDrop.id).n, 1);
 
   // Abandono legado -> retomada -> abandono datado em 2025: mantém o legado em Sempre (total +1) e conta 2025 sem criar ano inválido.
   await call('PUT', `/books/${legacyDrop.id}/shelf`, { status: 'reading' });
@@ -1029,6 +1030,25 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   await call('POST', '/import', JSON.stringify(migratedBackup));
   assert.equal((await call('GET', '/stats?year=2021')).json.dropped, 1);
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 1);
+
+  // Backup de c125ac2 (`drops: []` + estante `dropped`) importado duas vezes sobre livro local já em `reading`:
+  // mantém o status local `reading`, preserva 1 abandono sem data em Sempre e não cria ano no seletor.
+  db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  const readingLocal = await newBook('Retomado Local', { authors: 'Autora Local', isbn: '9788500000801' });
+  await call('PUT', `/books/${readingLocal.id}/shelf`, { status: 'reading' });
+  const c125Backup = {
+    app: 'orelha',
+    books: [{ id: 'ext_drop_id', title: 'Retomado Local', authors: ['Autora Local'], isbn: '9788500000801' }],
+    shelf: [{ book_id: 'ext_drop_id', status: 'dropped' }],
+    drops: [],
+    logs: [],
+  };
+  await call('POST', '/import', JSON.stringify(c125Backup));
+  await call('POST', '/import', JSON.stringify(c125Backup));
+  assert.equal((await call('GET', `/books/${readingLocal.id}`)).json.book.status, 'reading');
+  const afterC125 = (await call('GET', '/stats?year=all')).json;
+  assert.equal(afterC125.dropped, 1);
+  assert.deepEqual(afterC125.years, []);
 
   // Ano sem metadados de gênero, formato nem nota devolve listas/notas vazias (UI oculta esses blocos).
   const plainBook = await newBook('Só Título', { pages: null, subjects: [] });

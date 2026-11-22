@@ -635,6 +635,7 @@ export function importOrelhaJson(data) {
 
     const hasDrops = Array.isArray(data.drops);
     const shelfFallbackDrops = [];
+    const shelfLegacyDropped = [];
     for (const s of Array.isArray(data.shelf) ? data.shelf : []) {
       const bookId = bookIdMap.get(safeBookId(s?.book_id));
       if (!bookId) { result.skipped++; continue; }
@@ -661,11 +662,14 @@ export function importOrelhaJson(data) {
           WHERE book_id = ?`)
           .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, bookId);
       }
-      // Backups sem a coleção `drops` (formato anterior com `shelf[].dropped_on` ou legados sem data).
+      // Backups sem a coleção `drops` (formato anterior com `shelf[].dropped_on` ou legados sem data)
+      // e backups com `drops` onde uma estante `dropped` ainda não tinha evento materializado.
       if (!hasDrops) {
         const shelfDroppedOn = normalizeDate(s.dropped_on);
         if (shelfDroppedOn) shelfFallbackDrops.push({ book_id: bookId, dropped_on: shelfDroppedOn, demo });
         else if (status === 'dropped') shelfFallbackDrops.push({ book_id: bookId, dropped_on: null, demo });
+      } else if (status === 'dropped') {
+        shelfLegacyDropped.push({ book_id: bookId, demo });
       }
     }
 
@@ -722,12 +726,20 @@ export function importOrelhaJson(data) {
     };
 
     if (hasDrops) {
+      const backupBooksWithDrops = new Set();
       for (const d of data.drops) {
         const bookId = bookIdMap.get(safeBookId(d?.book_id));
         const hasRawDate = d?.dropped_on !== null && d?.dropped_on !== undefined && String(d.dropped_on).trim() !== '';
         const droppedOn = hasRawDate ? normalizeDate(d.dropped_on) : null;
         if (!bookId || (hasRawDate && !droppedOn)) { result.skipped++; continue; }
+        backupBooksWithDrops.add(bookId);
         restoreDrop(bookId, droppedOn, d.demo ? 1 : 0, safeTimestamp(d.created_at));
+      }
+      // Backup com `drops` mas estante `dropped` sem evento para aquele livro: preserva abandono sem data.
+      for (const d of shelfLegacyDropped) {
+        if (!backupBooksWithDrops.has(d.book_id)) {
+          restoreDrop(d.book_id, null, d.demo, null);
+        }
       }
     } else {
       for (const d of shelfFallbackDrops) {

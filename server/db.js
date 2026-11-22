@@ -127,21 +127,24 @@ CREATE TABLE IF NOT EXISTS api_cache (
 // Se `drops.dropped_on` foi criada como NOT NULL, recria permitindo NULL para preservar abandonos legados sem data.
 const dropDateCol = db.prepare('PRAGMA table_info(drops)').all().find((c) => c.name === 'dropped_on');
 if (dropDateCol?.notnull) {
-  db.exec(`
-    CREATE TABLE drops_new (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-      dropped_on TEXT,
-      demo INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    INSERT INTO drops_new (id, book_id, dropped_on, demo, created_at)
-      SELECT id, book_id, dropped_on, demo, created_at FROM drops;
-    DROP TABLE drops;
-    ALTER TABLE drops_new RENAME TO drops;
-    CREATE INDEX IF NOT EXISTS drops_book ON drops(book_id);
-    CREATE INDEX IF NOT EXISTS drops_date ON drops(dropped_on);
-  `);
+  transaction(() => {
+    db.exec(`
+      DROP TABLE IF EXISTS drops_new;
+      CREATE TABLE drops_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        dropped_on TEXT,
+        demo INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO drops_new (id, book_id, dropped_on, demo, created_at)
+        SELECT id, book_id, dropped_on, demo, created_at FROM drops;
+      DROP TABLE drops;
+      ALTER TABLE drops_new RENAME TO drops;
+      CREATE INDEX IF NOT EXISTS drops_book ON drops(book_id);
+      CREATE INDEX IF NOT EXISTS drops_date ON drops(dropped_on);
+    `);
+  });
 }
 
 // Migra eventuais datas gravadas em `shelf.dropped_on` sem duplicar eventos já existentes.
