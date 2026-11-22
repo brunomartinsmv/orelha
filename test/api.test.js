@@ -1087,6 +1087,26 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 2);
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
 
+  // Ordem das entradas no backup (`[NULL, 08:00]` vs `[08:00, NULL]`) sobre `[08:00, 09:00]` locais
+  // reserva primeiro a correspondência exata e mantém exatamente uma ocorrência de 08:00 e uma de 09:00 em ambas as ordens.
+  for (const order of [
+    [{ book_id: 'ord_1', dropped_on: '2025-07-01', created_at: null }, { book_id: 'ord_1', dropped_on: '2025-07-01', created_at: '2025-07-01 08:00:00' }],
+    [{ book_id: 'ord_1', dropped_on: '2025-07-01', created_at: '2025-07-01 08:00:00' }, { book_id: 'ord_1', dropped_on: '2025-07-01', created_at: null }],
+  ]) {
+    db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+    db.prepare(`INSERT INTO books (id, title, authors, source) VALUES ('ord_1', 'Mesmo Dia', '["Autora"]', 'manual')`).run();
+    db.prepare(`INSERT INTO drops (book_id, dropped_on, created_at) VALUES ('ord_1', '2025-07-01', '2025-07-01 08:00:00'), ('ord_1', '2025-07-01', '2025-07-01 09:00:00')`).run();
+    await call('POST', '/import', JSON.stringify({
+      app: 'orelha',
+      books: [{ id: 'ord_1', title: 'Mesmo Dia', authors: ['Autora'] }],
+      shelf: [],
+      drops: order,
+      logs: [],
+    }));
+    const times = db.prepare(`SELECT created_at FROM drops WHERE book_id = 'ord_1' ORDER BY created_at`).all().map((r) => r.created_at);
+    assert.deepEqual(times, ['2025-07-01 08:00:00', '2025-07-01 09:00:00']);
+  }
+
   // Importação CSV com livro abandonado preserva o abandono histórico mesmo quando o livro local já está em `reading`.
   db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
   const csvReading = await newBook('Lendo Localmente', { authors: 'Autora CSV', isbn: '9788500000802' });

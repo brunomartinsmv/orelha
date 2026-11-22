@@ -709,26 +709,7 @@ export function importOrelhaJson(data) {
       result.logs_added++;
     }
 
-    const restoreDrop = (bookId, droppedOn, demo, createdAt) => {
-      const sameKey = (c) => !usedDropIds.has(c.id) && c.book_id === bookId && (c.dropped_on ?? null) === droppedOn;
-      // Eventos com `created_at` explícito de ambos os lados só casam com o mesmo timestamp;
-      // eventos migrados/fallback (`created_at === null`) ou legados sem data (`droppedOn === null`) conciliam em qualquer ordem.
-      const match = (createdAt && preexistingDrops.find((c) => sameKey(c) && c.created_at === createdAt))
-        || (droppedOn === null || !createdAt
-          ? preexistingDrops.find(sameKey)
-          : preexistingDrops.find((c) => sameKey(c) && !c.created_at));
-      if (match) {
-        usedDropIds.add(match.id);
-        if (createdAt && !match.created_at) {
-          db.prepare('UPDATE drops SET created_at = ? WHERE id = ?').run(createdAt, match.id);
-          match.created_at = createdAt;
-        }
-      } else {
-        db.prepare('INSERT INTO drops (book_id, dropped_on, demo, created_at) VALUES (?, ?, ?, ?)')
-          .run(bookId, droppedOn, demo, createdAt ?? null);
-      }
-    };
-
+    const incomingDrops = [];
     if (hasDrops) {
       const backupBooksWithDrops = new Set();
       for (const d of data.drops) {
@@ -737,17 +718,49 @@ export function importOrelhaJson(data) {
         const droppedOn = hasRawDate ? normalizeDate(d.dropped_on) : null;
         if (!bookId || (hasRawDate && !droppedOn)) { result.skipped++; continue; }
         backupBooksWithDrops.add(bookId);
-        restoreDrop(bookId, droppedOn, d.demo ? 1 : 0, safeTimestamp(d.created_at));
+        incomingDrops.push({ bookId, droppedOn, demo: d.demo ? 1 : 0, createdAt: safeTimestamp(d.created_at), matched: false });
       }
       // Backup com `drops` mas estante `dropped` sem evento para aquele livro: preserva abandono sem data.
       for (const d of shelfLegacyDropped) {
         if (!backupBooksWithDrops.has(d.book_id)) {
-          restoreDrop(d.book_id, null, d.demo, null);
+          incomingDrops.push({ bookId: d.book_id, droppedOn: null, demo: d.demo, createdAt: null, matched: false });
         }
       }
     } else {
       for (const d of shelfFallbackDrops) {
-        restoreDrop(d.book_id, d.dropped_on, d.demo, null);
+        incomingDrops.push({ bookId: d.book_id, droppedOn: d.dropped_on, demo: d.demo, createdAt: null, matched: false });
+      }
+    }
+
+    // Passo 1: reserva primeiro todas as correspondências exatas por (book_id, dropped_on, created_at)
+    // para que uma entrada sem horário nunca roube a correspondência exata de outra entrada do mesmo backup.
+    for (const item of incomingDrops) {
+      if (!item.createdAt) continue;
+      const exact = preexistingDrops.find((c) => !usedDropIds.has(c.id)
+        && c.book_id === item.bookId
+        && (c.dropped_on ?? null) === item.droppedOn
+        && c.created_at === item.createdAt);
+      if (exact) {
+        usedDropIds.add(exact.id);
+        item.matched = true;
+      }
+    }
+    // Passo 2: concilia o restante com linhas ainda livres (sem horário ou legadas `dropped_on === null`).
+    for (const item of incomingDrops) {
+      if (item.matched) continue;
+      const sameKey = (c) => !usedDropIds.has(c.id) && c.book_id === item.bookId && (c.dropped_on ?? null) === item.droppedOn;
+      const match = item.droppedOn === null || !item.createdAt
+        ? preexistingDrops.find(sameKey)
+        : preexistingDrops.find((c) => sameKey(c) && !c.created_at);
+      if (match) {
+        usedDropIds.add(match.id);
+        if (item.createdAt && !match.created_at) {
+          db.prepare('UPDATE drops SET created_at = ? WHERE id = ?').run(item.createdAt, match.id);
+          match.created_at = item.createdAt;
+        }
+      } else {
+        db.prepare('INSERT INTO drops (book_id, dropped_on, demo, created_at) VALUES (?, ?, ?, ?)')
+          .run(item.bookId, item.droppedOn, item.demo, item.createdAt ?? null);
       }
     }
 
