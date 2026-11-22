@@ -178,7 +178,7 @@ export function createApp(config) {
       const message = status === 502
         ? 'Não consegui falar com a Open Library agora. Tente de novo em instantes.'
         : err.status ? err.message : 'Algo deu errado aqui no servidor.';
-      sendJson(res, status, { error: message });
+      sendJson(res, status, { error: message, ...(err.extra || {}) });
     }
   });
   return server;

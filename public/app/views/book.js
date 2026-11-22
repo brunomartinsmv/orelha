@@ -1,5 +1,5 @@
 import { html, useRef, useState } from '/vendor/htm-preact.js';
-import { act, api, authorLine, formatDate, navigate, num, ratingText, useBookTone, useFetch } from '../lib.js';
+import { act, api, authorLine, formatDate, navigate, num, queueShelfStatus, ratingText, toast, useBookTone, useFetch } from '../lib.js';
 import { Cover, ErrorBox, Icon, Rail, Sheet, Stars } from '../ui.js';
 import { ListPickerSheet, LogSheet, ProgressSheet, QuoteSheet, GenrePicker } from '../sheets.js';
 
@@ -186,11 +186,20 @@ function BookLoaded({ data, sheet, setSheet }) {
   const { book, community, logs, quotes, lists, favorite_slot: favoriteSlot } = data;
   const tone = useBookTone(book);
   const [editLog, setEditLog] = useState(null);
-  const bookId = encodeURIComponent(book.id);
+  const [savingStatus, setSavingStatus] = useState(false);
 
   const setStatus = async (status) => {
     if (status === 'read') { setSheet('log'); return; }
-    await act(() => api(`/books/${bookId}/shelf`, { method: 'PUT', body: { status: book.status === status ? null : status } }));
+    if (savingStatus) return;
+    const next = book.status === status ? null : status;
+    setSavingStatus(true);
+    const res = await queueShelfStatus(book, next);
+    setSavingStatus(false);
+    if (res.status === 'queued') {
+      toast('Status salvo na fila de sincronização.');
+    } else if (res.status === 'conflict' || res.status === 'error') {
+      toast(res.error?.message || 'Não foi possível alterar o status.', 'err');
+    }
   };
   const removeFavorite = () => act(() => api(`/favorites/${favoriteSlot}`, { method: 'PUT', body: { book_id: null } }), 'Saiu dos 4 favoritos.');
   const removeQuote = (q) => confirm('Apagar este trecho?') && act(() => api(`/quotes/${q.id}`, { method: 'DELETE' }));
@@ -254,9 +263,12 @@ function BookLoaded({ data, sheet, setSheet }) {
             <button class="section-link" onClick=${() => setSheet('quote')}>+ Guardar trecho</button>
           </div>
           ${quotes.length === 0 && html`<p class="muted" style="font-size:14px">Aquela frase que você sublinhou mora aqui.</p>`}
-          ${quotes.map((q) => html`<div key=${q.id} class="quote-item">
+          ${quotes.map((q) => html`<div key=${q.id} class=${`quote-item ${q.pending ? 'pending' : ''}`}>
             <blockquote>${q.text}</blockquote>
-            <div class="quote-foot"><span>${q.page ? `p. ${q.page}` : ''}</span><button class="link-btn" onClick=${() => removeQuote(q)}>Apagar</button></div>
+            <div class="quote-foot">
+              <span>${[q.page ? `p. ${q.page}` : null, q.pending ? 'aguardando sincronização' : null].filter(Boolean).join(' · ')}</span>
+              ${!q.pending && html`<button class="link-btn" onClick=${() => removeQuote(q)}>Apagar</button>`}
+            </div>
           </div>`)}
         </section>
       </div>

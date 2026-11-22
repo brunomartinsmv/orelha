@@ -6,7 +6,7 @@ const COVERS = 'orelha-covers-v1';
 
 const SHELL_FILES = [
   '/', '/styles.css', '/manifest.webmanifest', '/vendor/htm-preact.js',
-  '/app/main.js', '/app/lib.js', '/app/ui.js', '/app/sheets.js', '/app/peek.js', '/app/spine.js',
+  '/app/main.js', '/app/lib.js', '/app/sync.js', '/app/ui.js', '/app/sheets.js', '/app/peek.js', '/app/spine.js',
   '/app/views/home.js', '/app/views/search.js', '/app/views/book.js', '/app/views/shelf.js',
   '/app/views/diary.js', '/app/views/discover.js', '/app/views/you.js', '/app/views/stats.js', '/app/views/lists.js',
   '/app/views/settings.js',
