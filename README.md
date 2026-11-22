@@ -6,7 +6,7 @@ O Orelha é um diário de leitura pessoal e uma estante virtual auto-hospedada �
 
 ![Demonstração do Orelha: leitura atual na tela inicial, estante de lombadas 3D, abertura do livro, ordenação por cor, modo escuro e retrospectiva](docs/demo.webp)
 
-> **Dica:** o vídeo em alta resolução (1280×720, 30 fps) também está em [`docs/demo.mp4`](docs/demo.mp4) e na página do projeto em **[brunomartinsmv.github.io/orelha](https://brunomartinsmv.github.io/orelha/)**.
+> **Dica:** o vídeo em 1440p (2560×1440, 30 fps) também está em [`docs/demo.mp4`](docs/demo.mp4) e na página do projeto em **[brunomartinsmv.github.io/orelha](https://brunomartinsmv.github.io/orelha/)**.
 
 | Página do livro (modo escuro) | No celular (PWA para iOS e Android) |
 | :---: | :---: |
