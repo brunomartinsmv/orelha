@@ -714,8 +714,10 @@ export function importOrelhaJson(data) {
 
     const restoreDrop = (bookId, droppedOn, demo, createdAt) => {
       const sameKey = (c) => !usedDropIds.has(c.id) && c.book_id === bookId && (c.dropped_on ?? null) === droppedOn;
+      // Para abandonos datados, `created_at` distingue ocorrências distintas no mesmo dia em backups separados;
+      // para abandonos legados sem data (`droppedOn === null`), concilia por livro entre snapshots pré e pós-migração.
       const match = (createdAt && preexistingDrops.find((c) => sameKey(c) && c.created_at === createdAt))
-        || preexistingDrops.find(sameKey);
+        || ((!createdAt || droppedOn === null) ? preexistingDrops.find(sameKey) : null);
       if (match) {
         usedDropIds.add(match.id);
       } else {

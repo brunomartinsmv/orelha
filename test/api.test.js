@@ -1077,6 +1077,14 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 2);
   assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 1);
 
+  // Dois abandonos datados distintos no mesmo dia vindos de backups separados não são fundidos.
+  await call('POST', '/import', JSON.stringify({
+    ...migratedSameLib,
+    drops: [{ book_id: 'ext_drop_id', dropped_on: '2025-07-01', created_at: '2025-07-01 11:00:00' }],
+  }));
+  assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 2);
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
+
   // Ano sem metadados de gênero, formato nem nota devolve listas/notas vazias (UI oculta esses blocos).
   const plainBook = await newBook('Só Título', { pages: null, subjects: [] });
   await call('POST', `/books/${plainBook.id}/logs`, { finished_on: '2020-06-01' });
