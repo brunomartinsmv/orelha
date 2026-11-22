@@ -33,7 +33,7 @@ function ManualSheet({ initialTitle, onClose }) {
       </div>
       <label class="field"><span>ISBN (opcional)</span><input class="input" placeholder="10 ou 13 dígitos" value=${form.isbn} onInput=${set('isbn')} /></label>
       <label class="field"><span>Sinopse (opcional)</span><textarea class="input" rows="3" value=${form.description} onInput=${set('description')}></textarea></label>
-      <${GenrePicker} selected=${genres} onToggle=${toggleGenre} other=${otherSubjects} onOther=${setOtherSubjects} />
+      <${GenrePicker} genres=${allGenres} selected=${genres} onToggle=${toggleGenre} other=${otherSubjects} onOther=${setOtherSubjects} />
       <p class="muted" style="font-size:13px;margin-top:12px;text-align:center">A capa você pode fotografar depois, na página do livro.</p>
       <div class="sticky-save">
         <button class="btn primary block" disabled=${saving}>${saving ? 'Criando…' : 'Criar livro'}</button>

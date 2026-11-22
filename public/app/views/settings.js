@@ -26,17 +26,25 @@ export function SettingsView() {
     const file = e.target.files?.[0];
     if (!file) return;
     setImporting(true);
-    // Lê os bytes antes de limpar o campo: no WebKit, um File de campo limpo falha ao enviar.
-    const bytes = await file.arrayBuffer();
-    e.target.value = '';
-    const result = await act(() => api('/import', { method: 'POST', raw: bytes }));
-    setImporting(false);
+    let result = null;
+    try {
+      // Lê os bytes antes de limpar o campo: no WebKit, um File de campo limpo falha ao enviar.
+      const bytes = await file.arrayBuffer();
+      e.target.value = '';
+      result = await act(() => api('/import', { method: 'POST', raw: bytes }));
+    } catch {
+      e.target.value = '';
+      toast('Não consegui ler o arquivo selecionado.', 'err');
+    } finally {
+      setImporting(false);
+    }
     if (result) {
       const parts = [
         plural(result.books_added, 'livro novo', 'livros novos'),
         plural(result.logs_added, 'registro', 'registros'),
         ...(result.quotes_added ? [plural(result.quotes_added, 'trecho', 'trechos')] : []),
         ...(result.lists_added ? [plural(result.lists_added, 'lista', 'listas')] : []),
+        ...(result.skipped ? [plural(result.skipped, 'ignorado', 'ignorados')] : []),
       ];
       const suffix = result.books_added > 0 && !result.format.includes('JSON') ? ' As capas chegam aos poucos.' : '';
       toast(`${result.format}: ${parts.join(', ')}.${suffix}`);

@@ -219,19 +219,18 @@ export function ListPickerSheet({ book, memberOf = [], onClose }) {
   <//>`;
 }
 
-export function GenrePicker({ selected, onToggle, other, onOther }) {
-  const { data: genres } = useFetch('/genres');
+export function GenrePicker({ genres, selected, onToggle, other, onOther }) {
   const set = new Set(selected);
   return html`
-    <div class="field">
+    ${genres?.length > 0 && html`<div class="field">
       <span class="field-label">Gêneros</span>
-      ${genres?.length > 0 && html`<div class="genre-picker" role="group" aria-label="Gêneros">
+      <div class="genre-picker" role="group" aria-label="Gêneros">
         ${genres.map((g) => {
           const on = set.has(g.id);
           return html`<button key=${g.id} type="button" class=${`chip ${on ? 'on' : ''}`} aria-pressed=${on} onClick=${() => onToggle(g.id)}>${g.label}</button>`;
         })}
-      </div>`}
-    </div>
+      </div>
+    </div>`}
     <label class="field">
       <span>Outros assuntos (separe por vírgula)</span>
       <input class="input" placeholder="Ex.: Sertão, Memória, Viagem" value=${other} onInput=${(e) => onOther(e.target.value)} />

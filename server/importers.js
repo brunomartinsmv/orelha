@@ -1,5 +1,5 @@
 // Importação de CSV (Skoob, Goodreads, StoryGraph, Orelha) e restauração de backup JSON do Orelha.
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { COVERS_DIR, db, transaction } from './db.js';
@@ -37,6 +37,7 @@ export function parseCsv(text) {
     else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
     else if (c !== '\r') cell += c;
   }
+  if (quoted) throw new HttpError(400, 'CSV malformado: aspas sem fechamento.');
   if (cell || row.length) { row.push(cell); rows.push(row); }
   const [header, ...body] = rows;
   if (!header) return [];
@@ -68,6 +69,14 @@ export function normalizeDate(v) {
   m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
   if (m) return validIsoDate(Number(m[3]), Number(m[2]), Number(m[1]));
   return null;
+}
+
+function safeTimestamp(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?Z?$/.test(s)) return null;
+  if (Number.isNaN(Date.parse(s.replace(' ', 'T')))) return null;
+  return s;
 }
 
 // O StoryGraph põe só o intervalo em "Dates Read": "2024/01/02-2024/01/30".
@@ -167,6 +176,15 @@ function rowLookup(row) {
   };
 }
 
+function firstValidIsbn(row, ...names) {
+  const byNorm = new Map(Object.entries(row).map(([k, v]) => [norm(k), v]));
+  for (const name of names) {
+    const isbn = cleanIsbn(byNorm.get(name));
+    if (isbn) return isbn;
+  }
+  return null;
+}
+
 function fromGoodreadsOrSkoob(r) {
   const shelf = parseShelfInfo(r['Exclusive Shelf'], r.Bookshelves);
   const review = unescapeCsvCell(r['My Review']);
@@ -222,7 +240,7 @@ function fromPortugueseCsv(r) {
   return {
     title: unescapeCsvCell(get('titulo', 'livro', 'nome')),
     authors: rawAuthors.split(authorSep).map((a) => unescapeCsvCell(a)).filter(Boolean),
-    isbn: cleanIsbn(get('isbn13', 'isbn 13', 'isbn', 'isbn10', 'isbn 10')),
+    isbn: firstValidIsbn(r, 'isbn13', 'isbn 13', 'isbn', 'isbn10', 'isbn 10'),
     pages: parsePositiveInt(get('paginas', 'numero de paginas', 'num paginas')),
     year: parsePositiveInt(get('ano', 'ano publicacao', 'ano de publicacao')),
     status: shelf.status,
@@ -254,17 +272,41 @@ function detectFormat(rows) {
   throw new HttpError(400, 'Não reconheci este arquivo. Use JSON/CSV do Orelha ou CSV do Skoob, Goodreads ou StoryGraph.');
 }
 
+// Evita fundir volumes distintos como "Coleção: Volume I" e "Coleção: Volume II",
+// mas casa "Duna" com "Duna: Livro 1" quando apenas um dos dois tem subtítulo.
+function sameTitle(a, b) {
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const pa = norm(String(a).split(/[:(]/)[0]);
+  const pb = norm(String(b).split(/[:(]/)[0]);
+  if (!pa || pa !== pb) return false;
+  return na === pa || nb === pb;
+}
+
 function findBook(item) {
   if (item.isbn) {
     const byIsbn = db.prepare('SELECT id FROM books WHERE isbn = ?').get(item.isbn);
     if (byIsbn) return byIsbn.id;
   }
   if (!item.title) return null;
-  const prefix = item.title.split(/[:(]/)[0].trim();
-  const candidates = db.prepare('SELECT id, title, authors FROM books WHERE title LIKE ?').all(`${prefix}%`);
-  const target = norm(prefix);
+  const prefix = item.title.split(/[:(]/)[0].trim() || item.title.trim();
+  const candidates = db.prepare('SELECT id, title, authors, isbn FROM books WHERE title LIKE ?').all(`${prefix}%`);
   const author = norm(item.authors?.[0] || '');
-  return candidates.find((c) => norm(c.title.split(/[:(]/)[0]) === target && norm(JSON.parse(c.authors || '[]')[0] || '') === author)?.id ?? null;
+  return candidates.find((c) => {
+    if (item.isbn && c.isbn && item.isbn !== c.isbn) return false;
+    return sameTitle(c.title, item.title) && norm(JSON.parse(c.authors || '[]')[0] || '') === author;
+  })?.id ?? null;
+}
+
+function sameLogContent(existing, incoming) {
+  return (existing.finished_on ?? null) === (incoming.finished_on ?? null)
+    && (existing.started_on ?? null) === (incoming.started_on ?? null)
+    && (existing.rating ?? null) === (incoming.rating ?? null)
+    && (existing.review ?? null) === (incoming.review ?? null)
+    && Boolean(existing.reread) === Boolean(incoming.reread)
+    && (existing.format ?? null) === (incoming.format ?? null);
 }
 
 export function importCsv(text) {
@@ -274,32 +316,63 @@ export function importCsv(text) {
   const result = { format: name, total: rows.length, books_added: 0, logs_added: 0, skipped: 0 };
 
   transaction(() => {
+    // Snapshot dos logs anteriores à importação para fazer matching por multiplicidade
+    // (preserva releituras sem data em banco vazio e evita duplicar logs manuais).
+    const preexistingLogsByBook = new Map();
+    for (const row of db.prepare('SELECT id, book_id, finished_on, started_on, rating, review, reread, format FROM logs').all()) {
+      const list = preexistingLogsByBook.get(row.book_id) || [];
+      list.push(row);
+      preexistingLogsByBook.set(row.book_id, list);
+    }
+    const usedLogIds = new Set();
+
     for (const row of rows) {
       const item = map(row);
-      if (!item.title?.trim()) { result.skipped++; continue; }
-      let bookId = findBook(item);
+      const title = item.title?.trim().slice(0, 300);
+      if (!title) { result.skipped++; continue; }
+      const authors = (item.authors || []).map((a) => a.trim().slice(0, 120)).filter(Boolean).slice(0, 12);
+      const review = item.review ? item.review.trim().slice(0, 20_000) : null;
+      const finishedOn = item.finished_on;
+      const startedOn = item.started_on && (!finishedOn || item.started_on <= finishedOn) ? item.started_on : null;
+      const hasLog = item.status === 'read' || finishedOn || item.rating || review;
+      const effectiveStatus = item.status || (hasLog ? 'read' : null);
+
+      let bookId = findBook({ title, authors, isbn: item.isbn });
       if (!bookId) {
         bookId = `b_${randomUUID().slice(0, 12)}`;
         db.prepare(`INSERT INTO books (id, title, authors, year, pages, isbn, cover_isbn, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'import')`)
-          .run(bookId, item.title.trim(), JSON.stringify(item.authors), item.year, item.pages, item.isbn, item.isbn);
+          .run(bookId, title, JSON.stringify(authors), item.year, item.pages, item.isbn, item.isbn);
         result.books_added++;
       }
       db.prepare('INSERT INTO shelf (book_id) VALUES (?) ON CONFLICT(book_id) DO NOTHING').run(bookId);
-      if (item.status || item.liked) {
+      if (effectiveStatus || item.liked) {
+        const shelfStartedOn = effectiveStatus === 'reading' ? (startedOn || new Date().toLocaleDateString('en-CA')) : null;
         db.prepare(`UPDATE shelf SET
-            status = COALESCE(?, status),
+            status = COALESCE(status, ?),
             liked = MAX(liked, ?),
-            started_on = COALESCE(started_on, ?)
+            started_on = CASE WHEN COALESCE(status, ?) = 'reading' THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
-          .run(item.status, item.liked ? 1 : 0, item.started_on || (item.status === 'reading' ? new Date().toLocaleDateString('en-CA') : null), bookId);
+          .run(effectiveStatus, item.liked ? 1 : 0, effectiveStatus, shelfStartedOn, bookId);
       }
-      if (item.status === 'read' || item.finished_on || item.rating || item.review) {
-        // A chave torna a importação idempotente: reimportar não duplica o diário.
-        const key = createHash('sha1').update(`${norm(item.title)}|${norm(item.authors[0] || '')}|${item.finished_on || ''}`).digest('hex');
-        const { changes } = db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format, import_key)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(import_key) DO NOTHING`)
-          .run(bookId, item.finished_on, item.started_on, item.rating, item.review, item.spoilers ? 1 : 0, item.reread ? 1 : 0, item.format ?? null, key);
-        result.logs_added += Number(changes);
+      if (hasLog) {
+        const incoming = {
+          finished_on: finishedOn,
+          started_on: startedOn,
+          rating: item.rating,
+          review,
+          reread: item.reread ? 1 : 0,
+          format: item.format ?? null,
+        };
+        const candidates = preexistingLogsByBook.get(bookId) || [];
+        const match = candidates.find((c) => !usedLogIds.has(c.id) && sameLogContent(c, incoming));
+        if (match) {
+          usedLogIds.add(match.id);
+        } else {
+          db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(bookId, incoming.finished_on, incoming.started_on, incoming.rating, incoming.review, item.spoilers ? 1 : 0, incoming.reread, incoming.format);
+          result.logs_added++;
+        }
       }
     }
   });
@@ -310,13 +383,15 @@ export function importCsv(text) {
 const VALID_STATUS = new Set(['want', 'reading', 'read', 'dropped']);
 const VALID_FORMAT = new Set(['paper', 'ebook', 'audio']);
 const VALID_COVER_FILE = /^up-[0-9a-f-]+\.(jpg|png|webp)$/;
+const VALID_BOOK_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
 
-function parseJsonArray(v) {
-  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+function parseJsonArray(v, { maxItem = 120, maxLen = 24 } = {}) {
+  const clean = (arr) => arr.map((x) => String(x ?? '').trim().slice(0, maxItem)).filter(Boolean).slice(0, maxLen);
+  if (Array.isArray(v)) return clean(v);
   if (typeof v === 'string') {
     try {
       const parsed = JSON.parse(v);
-      if (Array.isArray(parsed)) return parsed.map((x) => String(x).trim()).filter(Boolean);
+      if (Array.isArray(parsed)) return clean(parsed);
     } catch { /* ignora */ }
   }
   return [];
@@ -337,6 +412,18 @@ function safeCoverFile(v) {
   return existsSync(join(COVERS_DIR, v)) ? v : null;
 }
 
+function safeBookId(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  return VALID_BOOK_ID.test(s) ? s : null;
+}
+
+function listKey(v) {
+  if (typeof v === 'number' && Number.isInteger(v)) return String(v);
+  if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 80);
+  return null;
+}
+
 export function importOrelhaJson(data) {
   if (!data || typeof data !== 'object' || data.app !== 'orelha' || !Array.isArray(data.books)) {
     throw new HttpError(400, 'Este JSON não parece ser um backup do Orelha.');
@@ -353,7 +440,24 @@ export function importOrelhaJson(data) {
   let needsEnrich = false;
 
   transaction(() => {
+    // Snapshots do banco antes da importação: garante que registros distintos no mesmo backup
+    // nunca colidam entre si, enquanto uma segunda importação do mesmo backup é 100% idempotente.
+    const preexistingBooks = db.prepare('SELECT * FROM books').all();
+    const preexistingBooksById = new Map(preexistingBooks.map((b) => [b.id, b]));
+    const preexistingBooksByOl = new Map(preexistingBooks.filter((b) => b.ol_key).map((b) => [b.ol_key, b]));
+    const preexistingBooksByIsbn = new Map(preexistingBooks.filter((b) => b.isbn).map((b) => [b.isbn, b]));
+    const backupIds = new Set(data.books.map((b) => safeBookId(b?.id)).filter(Boolean));
+    const usedTargetBookIds = new Set();
     const bookIdMap = new Map();
+
+    const preexistingLogs = db.prepare('SELECT * FROM logs').all();
+    const usedLogIds = new Set();
+    const preexistingProgress = db.prepare('SELECT * FROM progress').all();
+    const usedProgressIds = new Set();
+    const preexistingQuotes = db.prepare('SELECT * FROM quotes').all();
+    const usedQuoteIds = new Set();
+    const preexistingLists = db.prepare('SELECT * FROM lists').all();
+    const usedListIds = new Set();
 
     for (const raw of data.books) {
       if (!raw || typeof raw !== 'object' || !String(raw.title || '').trim()) {
@@ -361,181 +465,277 @@ export function importOrelhaJson(data) {
         continue;
       }
       const title = String(raw.title).trim().slice(0, 300);
-      const authors = parseJsonArray(raw.authors);
-      const subjects = parseJsonArray(raw.subjects).slice(0, 16);
+      const authors = parseJsonArray(raw.authors, { maxItem: 120, maxLen: 12 });
+      const subjects = parseJsonArray(raw.subjects, { maxItem: 60, maxLen: 24 });
       const isbn = cleanIsbn(raw.isbn);
-      const olKey = typeof raw.ol_key === 'string' && raw.ol_key.trim() ? raw.ol_key.trim() : null;
-      const oldId = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : null;
+      const olKey = typeof raw.ol_key === 'string' && raw.ol_key.trim() ? raw.ol_key.trim().slice(0, 40) : null;
+      const oldId = safeBookId(raw.id);
+      const subtitle = raw.subtitle ? String(raw.subtitle).trim().slice(0, 300) : null;
+      const originalTitle = raw.original_title ? String(raw.original_title).trim().slice(0, 300) : null;
+      const year = safeInt(raw.year);
+      const pages = safeInt(raw.pages, { min: 1 });
+      const coverId = safeInt(raw.cover_id, { min: 1 });
+      const coverIsbn = cleanIsbn(raw.cover_isbn) || isbn;
+      const coverFile = safeCoverFile(raw.cover_file);
+      const color = typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : null;
+      const description = raw.description ? String(raw.description).trim().slice(0, 10_000) : null;
+      const userEdited = raw.user_edited ? 1 : 0;
+      const detailsAt = typeof raw.details_at === 'string' ? raw.details_at.trim().slice(0, 40) : null;
+      const createdAt = safeTimestamp(raw.created_at);
 
-      let existing = (oldId && db.prepare('SELECT * FROM books WHERE id = ?').get(oldId))
-        || (olKey && db.prepare('SELECT * FROM books WHERE ol_key = ?').get(olKey))
-        || null;
+      // Só casa contra livros preexistentes e ainda não reclamados por outro livro deste backup.
+      let existing = null;
+      const takeIfFree = (row) => (row && !usedTargetBookIds.has(row.id) ? row : null);
+      if (oldId) existing = takeIfFree(preexistingBooksById.get(oldId));
+      if (!existing && olKey) existing = takeIfFree(preexistingBooksByOl.get(olKey));
+      if (!existing && isbn) existing = takeIfFree(preexistingBooksByIsbn.get(isbn));
       if (!existing) {
-        const matchedId = findBook({ title, authors, isbn });
-        if (matchedId) existing = db.prepare('SELECT * FROM books WHERE id = ?').get(matchedId);
+        const firstAuthor = norm(authors[0] || '');
+        existing = preexistingBooks.find((c) => {
+          if (usedTargetBookIds.has(c.id)) return false;
+          if (oldId && c.id !== oldId && backupIds.has(c.id)) return false;
+          if (isbn && c.isbn && isbn !== c.isbn) return false;
+          return sameTitle(c.title, title) && norm(JSON.parse(c.authors || '[]')[0] || '') === firstAuthor;
+        }) || null;
       }
 
       if (existing) {
+        usedTargetBookIds.add(existing.id);
         if (oldId) bookIdMap.set(oldId, existing.id);
-        // Completa campos que estejam vazios no banco atual sem pisar em edições locais.
-        const coverFile = safeCoverFile(raw.cover_file);
-        db.prepare(`UPDATE books SET
-            subtitle = COALESCE(subtitle, ?),
-            year = COALESCE(year, ?),
-            pages = COALESCE(pages, ?),
-            isbn = COALESCE(isbn, ?),
-            cover_id = COALESCE(cover_id, ?),
-            cover_isbn = COALESCE(cover_isbn, ?),
-            cover_file = COALESCE(cover_file, ?),
-            color = COALESCE(color, ?),
-            description = COALESCE(description, ?),
-            subjects = CASE WHEN subjects = '[]' THEN ? ELSE subjects END
-          WHERE id = ?`)
-          .run(
-            raw.subtitle ? String(raw.subtitle).trim().slice(0, 300) : null,
-            safeInt(raw.year),
-            safeInt(raw.pages, { min: 1 }),
-            isbn,
-            safeInt(raw.cover_id, { min: 1 }),
-            cleanIsbn(raw.cover_isbn) || isbn,
-            coverFile,
-            typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : null,
-            raw.description ? String(raw.description).trim().slice(0, 10_000) : null,
-            JSON.stringify(subjects),
-            existing.id,
-          );
+        if (existing.user_edited) {
+          // Preserva todas as edições locais (inclusive campos limpos de propósito).
+          if (coverFile && !existing.cover_file) {
+            db.prepare('UPDATE books SET cover_file = ? WHERE id = ?').run(coverFile, existing.id);
+          }
+        } else if (userEdited) {
+          // O banco local tinha apenas cache do catálogo; aplica a edição real do backup.
+          db.prepare(`UPDATE books SET
+              title = ?, title_is_pt = ?, original_title = COALESCE(?, original_title), subtitle = ?,
+              authors = ?, year = ?, pages = ?, isbn = ?,
+              cover_id = COALESCE(cover_id, ?), cover_isbn = ?,
+              cover_file = COALESCE(cover_file, ?), color = COALESCE(?, color),
+              description = ?, subjects = ?, user_edited = 1, details_at = COALESCE(?, details_at)
+            WHERE id = ?`)
+            .run(
+              title, raw.title_is_pt ? 1 : 0, originalTitle, subtitle,
+              JSON.stringify(authors), year, pages, isbn,
+              coverId, coverIsbn, coverFile, color,
+              description, JSON.stringify(subjects), detailsAt,
+              existing.id,
+            );
+        } else {
+          db.prepare(`UPDATE books SET
+              subtitle = COALESCE(subtitle, ?),
+              year = COALESCE(year, ?),
+              pages = COALESCE(pages, ?),
+              isbn = COALESCE(isbn, ?),
+              cover_id = COALESCE(cover_id, ?),
+              cover_isbn = COALESCE(cover_isbn, ?),
+              cover_file = COALESCE(cover_file, ?),
+              color = COALESCE(color, ?),
+              description = COALESCE(description, ?),
+              subjects = CASE WHEN subjects = '[]' THEN ? ELSE subjects END
+            WHERE id = ?`)
+            .run(subtitle, year, pages, isbn, coverId, coverIsbn, coverFile, color, description, JSON.stringify(subjects), existing.id);
+        }
         continue;
       }
 
-      const newId = oldId || `b_${randomUUID().slice(0, 12)}`;
+      const idTaken = oldId && db.prepare('SELECT 1 FROM books WHERE id = ?').get(oldId);
+      const newId = oldId && !idTaken ? oldId : `b_${randomUUID().slice(0, 12)}`;
+      const safeOlKey = olKey && !db.prepare('SELECT 1 FROM books WHERE ol_key = ?').get(olKey) ? olKey : null;
       const source = typeof raw.source === 'string' && raw.source.trim() ? raw.source.trim().slice(0, 40) : 'import';
-      const coverFile = safeCoverFile(raw.cover_file);
-      const color = typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : null;
       db.prepare(`INSERT INTO books (
           id, ol_key, title, title_is_pt, original_title, subtitle, authors, year, pages,
-          isbn, cover_id, cover_isbn, cover_file, color, description, subjects, source, user_edited, details_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          isbn, cover_id, cover_isbn, cover_file, color, description, subjects, source, user_edited, details_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
         .run(
-          newId,
-          olKey,
-          title,
-          raw.title_is_pt ? 1 : 0,
-          raw.original_title ? String(raw.original_title).trim().slice(0, 300) : null,
-          raw.subtitle ? String(raw.subtitle).trim().slice(0, 300) : null,
-          JSON.stringify(authors),
-          safeInt(raw.year),
-          safeInt(raw.pages, { min: 1 }),
-          isbn,
-          safeInt(raw.cover_id, { min: 1 }),
-          cleanIsbn(raw.cover_isbn) || isbn,
-          coverFile,
-          color,
-          raw.description ? String(raw.description).trim().slice(0, 10_000) : null,
-          JSON.stringify(subjects),
-          source,
-          raw.user_edited ? 1 : 0,
-          typeof raw.details_at === 'string' ? raw.details_at : null,
+          newId, safeOlKey, title, raw.title_is_pt ? 1 : 0, originalTitle, subtitle,
+          JSON.stringify(authors), year, pages, isbn, coverId, coverIsbn, coverFile, color,
+          description, JSON.stringify(subjects), source, userEdited, detailsAt, createdAt,
         );
+      usedTargetBookIds.add(newId);
       if (oldId) bookIdMap.set(oldId, newId);
       result.books_added++;
-      if (source === 'import' && !olKey && !raw.details_at) needsEnrich = true;
+      if (source === 'import' && !safeOlKey && !detailsAt && !userEdited) needsEnrich = true;
     }
 
     for (const s of Array.isArray(data.shelf) ? data.shelf : []) {
-      const bookId = bookIdMap.get(s?.book_id);
-      if (!bookId) continue;
+      const bookId = bookIdMap.get(safeBookId(s?.book_id));
+      if (!bookId) { result.skipped++; continue; }
       const status = VALID_STATUS.has(s.status) ? s.status : null;
       const liked = s.liked ? 1 : 0;
       const currentPage = safeInt(s.current_page);
       const startedOn = normalizeDate(s.started_on);
-      db.prepare(`INSERT INTO shelf (book_id, status, liked, current_page, started_on, demo)
-        VALUES (?, ?, ?, ?, ?, 0)
-        ON CONFLICT(book_id) DO UPDATE SET
-          status = COALESCE(shelf.status, excluded.status),
-          liked = MAX(shelf.liked, excluded.liked),
-          current_page = COALESCE(shelf.current_page, excluded.current_page),
-          started_on = COALESCE(shelf.started_on, excluded.started_on)`)
-        .run(bookId, status, liked, currentPage, startedOn);
+      const demo = s.demo ? 1 : 0;
+      const updatedAt = safeTimestamp(s.updated_at);
+      const cur = db.prepare('SELECT * FROM shelf WHERE book_id = ?').get(bookId);
+      if (!cur) {
+        const allowRunning = status === 'reading' || status === 'dropped';
+        db.prepare(`INSERT INTO shelf (book_id, status, liked, current_page, started_on, demo, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
+          .run(bookId, status, liked, allowRunning ? currentPage : null, allowRunning ? startedOn : null, demo, updatedAt);
+      } else {
+        const finalStatus = cur.status ?? status;
+        const allowRunning = finalStatus === 'reading' || finalStatus === 'dropped';
+        db.prepare(`UPDATE shelf SET
+            status = ?,
+            liked = MAX(liked, ?),
+            current_page = CASE WHEN ? THEN COALESCE(current_page, ?) ELSE current_page END,
+            started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END
+          WHERE book_id = ?`)
+          .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, bookId);
+      }
     }
 
     for (const l of Array.isArray(data.logs) ? data.logs : []) {
-      const bookId = bookIdMap.get(l?.book_id);
-      if (!bookId) continue;
+      const bookId = bookIdMap.get(safeBookId(l?.book_id));
+      if (!bookId) { result.skipped++; continue; }
       const finishedOn = normalizeDate(l.finished_on);
-      const startedOn = normalizeDate(l.started_on);
+      const rawStarted = normalizeDate(l.started_on);
+      const startedOn = rawStarted && (!finishedOn || rawStarted <= finishedOn) ? rawStarted : null;
       const rating = safeRating(l.rating);
       const review = l.review ? String(l.review).trim().slice(0, 20_000) : null;
       const spoilers = l.spoilers ? 1 : 0;
       const reread = l.reread ? 1 : 0;
       const format = VALID_FORMAT.has(l.format) ? l.format : null;
-      const importKey = typeof l.import_key === 'string' && l.import_key.trim() ? l.import_key.trim() : null;
+      const importKey = typeof l.import_key === 'string' && l.import_key.trim() ? l.import_key.trim().slice(0, 120) : null;
+      const demo = l.demo ? 1 : 0;
+      const createdAt = safeTimestamp(l.created_at);
 
-      if (importKey && db.prepare('SELECT 1 FROM logs WHERE import_key = ?').get(importKey)) continue;
-      const dup = db.prepare(`SELECT 1 FROM logs WHERE book_id = ?
-        AND finished_on IS ? AND started_on IS ? AND rating IS ? AND review IS ? AND reread = ? AND format IS ? LIMIT 1`)
-        .get(bookId, finishedOn, startedOn, rating, review, reread, format);
-      if (dup) continue;
+      const match = preexistingLogs.find((c) => {
+        if (usedLogIds.has(c.id)) return false;
+        if (importKey && c.import_key === importKey) return true;
+        return c.book_id === bookId
+          && (c.finished_on ?? null) === finishedOn
+          && (c.started_on ?? null) === startedOn
+          && (c.rating ?? null) === rating
+          && (c.review ?? null) === review
+          && Boolean(c.spoilers) === Boolean(spoilers)
+          && Boolean(c.reread) === Boolean(reread)
+          && (c.format ?? null) === format
+          && (!createdAt || c.created_at === createdAt);
+      });
+      if (match) {
+        usedLogIds.add(match.id);
+        continue;
+      }
 
-      db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format, import_key, demo)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`)
-        .run(bookId, finishedOn, startedOn, rating, review, spoilers, reread, format, importKey);
+      const safeKey = importKey && !db.prepare('SELECT 1 FROM logs WHERE import_key = ?').get(importKey) ? importKey : null;
+      db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format, import_key, demo, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
+        .run(bookId, finishedOn, startedOn, rating, review, spoilers, reread, format, safeKey, demo, createdAt);
       result.logs_added++;
     }
 
     for (const p of Array.isArray(data.progress) ? data.progress : []) {
-      const bookId = bookIdMap.get(p?.book_id);
+      const bookId = bookIdMap.get(safeBookId(p?.book_id));
       const page = safeInt(p?.page);
       const onDay = normalizeDate(p?.on_day);
-      if (!bookId || page === null || !onDay) continue;
-      const dup = db.prepare('SELECT 1 FROM progress WHERE book_id = ? AND page = ? AND on_day = ? LIMIT 1').get(bookId, page, onDay);
-      if (!dup) db.prepare('INSERT INTO progress (book_id, page, on_day, demo) VALUES (?, ?, ?, 0)').run(bookId, page, onDay);
+      if (!bookId || page === null || !onDay) { result.skipped++; continue; }
+      const demo = p.demo ? 1 : 0;
+      const match = preexistingProgress.find((c) => !usedProgressIds.has(c.id) && c.book_id === bookId && c.page === page && c.on_day === onDay);
+      if (match) {
+        usedProgressIds.add(match.id);
+      } else {
+        db.prepare('INSERT INTO progress (book_id, page, on_day, demo) VALUES (?, ?, ?, ?)').run(bookId, page, onDay, demo);
+      }
     }
 
     for (const q of Array.isArray(data.quotes) ? data.quotes : []) {
-      const bookId = bookIdMap.get(q?.book_id);
+      const bookId = bookIdMap.get(safeBookId(q?.book_id));
       const text = q?.text ? String(q.text).trim().slice(0, 5000) : '';
       const page = safeInt(q?.page);
-      if (!bookId || !text) continue;
-      const dup = db.prepare('SELECT 1 FROM quotes WHERE book_id = ? AND text = ? AND page IS ? LIMIT 1').get(bookId, text, page);
-      if (!dup) {
-        db.prepare('INSERT INTO quotes (book_id, text, page, demo) VALUES (?, ?, ?, 0)').run(bookId, text, page);
+      if (!bookId || !text) { result.skipped++; continue; }
+      const demo = q.demo ? 1 : 0;
+      const createdAt = safeTimestamp(q.created_at);
+      const match = preexistingQuotes.find((c) => !usedQuoteIds.has(c.id) && c.book_id === bookId && c.text === text && (c.page ?? null) === page);
+      if (match) {
+        usedQuoteIds.add(match.id);
+      } else {
+        db.prepare(`INSERT INTO quotes (book_id, text, page, demo, created_at)
+          VALUES (?, ?, ?, ?, COALESCE(?, datetime('now')))`).run(bookId, text, page, demo, createdAt);
         result.quotes_added++;
       }
     }
 
     const listIdMap = new Map();
-    for (const l of Array.isArray(data.lists) ? data.lists : []) {
+    const mergedListIds = new Set();
+    const rawLists = Array.isArray(data.lists) ? data.lists : [];
+    const titleCounts = new Map();
+    for (const l of rawLists) {
+      const t = l?.title ? String(l.title).trim().toLowerCase() : '';
+      if (t) titleCounts.set(t, (titleCounts.get(t) || 0) + 1);
+    }
+
+    for (const l of rawLists) {
       const title = l?.title ? String(l.title).trim().slice(0, 120) : '';
-      if (!title) continue;
-      const existing = db.prepare('SELECT id FROM lists WHERE lower(title) = lower(?) LIMIT 1').get(title);
-      if (existing) {
-        listIdMap.set(l.id, existing.id);
+      if (!title) { result.skipped++; continue; }
+      const desc = l.description ? String(l.description).trim().slice(0, 1000) : null;
+      const ranked = l.ranked ? 1 : 0;
+      const demo = l.demo ? 1 : 0;
+      const createdAt = safeTimestamp(l.created_at);
+      const srcKey = listKey(l.id);
+
+      let match = preexistingLists.find((c) => !usedListIds.has(c.id)
+        && c.title.toLowerCase() === title.toLowerCase()
+        && (c.description ?? null) === desc
+        && Boolean(c.ranked) === Boolean(ranked)
+        && (!createdAt || c.created_at === createdAt));
+      if (!match && (titleCounts.get(title.toLowerCase()) || 0) === 1) {
+        match = preexistingLists.find((c) => !usedListIds.has(c.id)
+          && c.title.toLowerCase() === title.toLowerCase()
+          && (c.description ?? null) === desc
+          && Boolean(c.ranked) === Boolean(ranked));
+      }
+
+      if (match) {
+        usedListIds.add(match.id);
+        mergedListIds.add(match.id);
+        if (srcKey !== null) listIdMap.set(srcKey, match.id);
       } else {
-        const desc = l.description ? String(l.description).trim().slice(0, 1000) : null;
-        const { lastInsertRowid } = db.prepare('INSERT INTO lists (title, description, ranked, demo) VALUES (?, ?, ?, 0)')
-          .run(title, desc, l.ranked ? 1 : 0);
-        listIdMap.set(l.id, Number(lastInsertRowid));
+        const { lastInsertRowid } = db.prepare(`INSERT INTO lists (title, description, ranked, demo, created_at)
+          VALUES (?, ?, ?, ?, COALESCE(?, datetime('now')))`).run(title, desc, ranked, demo, createdAt);
+        const newListId = Number(lastInsertRowid);
+        usedListIds.add(newListId);
+        if (srcKey !== null) listIdMap.set(srcKey, newListId);
         result.lists_added++;
       }
     }
 
-    for (const item of Array.isArray(data.list_items) ? data.list_items : []) {
-      const listId = listIdMap.get(item?.list_id);
-      const bookId = bookIdMap.get(item?.book_id);
-      if (!listId || !bookId) continue;
-      const pos = safeInt(item.position) ?? 0;
+    const nextPosByList = new Map();
+    for (const listId of mergedListIds) {
+      const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM list_items WHERE list_id = ?').get(listId).m;
+      nextPosByList.set(listId, maxPos + 1);
+    }
+
+    const rawItems = Array.isArray(data.list_items) ? [...data.list_items] : [];
+    rawItems.sort((a, b) => (safeInt(a?.position) ?? 0) - (safeInt(b?.position) ?? 0));
+    for (const item of rawItems) {
+      const srcList = listKey(item?.list_id);
+      const listId = srcList !== null ? listIdMap.get(srcList) : null;
+      const bookId = bookIdMap.get(safeBookId(item?.book_id));
+      if (!listId || !bookId) { result.skipped++; continue; }
+      let pos = safeInt(item.position) ?? 0;
+      if (mergedListIds.has(listId)) {
+        const exists = db.prepare('SELECT 1 FROM list_items WHERE list_id = ? AND book_id = ?').get(listId, bookId);
+        if (exists) continue;
+        pos = nextPosByList.get(listId);
+        nextPosByList.set(listId, pos + 1);
+      }
       db.prepare('INSERT INTO list_items (list_id, book_id, position) VALUES (?, ?, ?) ON CONFLICT DO NOTHING')
         .run(listId, bookId, pos);
     }
 
     for (const f of Array.isArray(data.favorites) ? data.favorites : []) {
       const slot = safeInt(f?.slot, { min: 1, max: 4 });
-      const bookId = bookIdMap.get(f?.book_id);
-      if (!slot || !bookId) continue;
+      const bookId = bookIdMap.get(safeBookId(f?.book_id));
+      if (!slot || !bookId) { result.skipped++; continue; }
+      const demo = f.demo ? 1 : 0;
       const slotTaken = db.prepare('SELECT 1 FROM favorites WHERE slot = ?').get(slot);
       const bookTaken = db.prepare('SELECT 1 FROM favorites WHERE book_id = ?').get(bookId);
       if (!slotTaken && !bookTaken) {
-        db.prepare('INSERT INTO favorites (slot, book_id, demo) VALUES (?, ?, 0)').run(slot, bookId);
+        db.prepare('INSERT INTO favorites (slot, book_id, demo) VALUES (?, ?, ?)').run(slot, bookId, demo);
       }
     }
   });
@@ -593,8 +793,16 @@ export async function enrichImported() {
         // Só o melhor resultado: se outra linha já é dona dessa obra, não vale pegar o 2º, que seria outro livro.
         const best = docs.find((d) => d.ol_key);
         const doc = best && !db.prepare('SELECT 1 FROM books WHERE ol_key = ?').get(best.ol_key) ? best : null;
-        db.prepare(`UPDATE books SET ol_key = ?, cover_id = COALESCE(cover_id, ?), pages = COALESCE(pages, ?), year = COALESCE(year, ?),
-                    isbn = COALESCE(isbn, ?), subjects = ?, details_at = ? WHERE id = ?`)
+        // Condiciona no SQL a user_edited = 0 para não sobrescrever edições feitas pelo leitor.
+        db.prepare(`UPDATE books SET
+            ol_key = ?,
+            cover_id = COALESCE(cover_id, ?),
+            pages = CASE WHEN user_edited = 0 THEN COALESCE(pages, ?) ELSE pages END,
+            year = CASE WHEN user_edited = 0 THEN COALESCE(year, ?) ELSE year END,
+            isbn = CASE WHEN user_edited = 0 THEN COALESCE(isbn, ?) ELSE isbn END,
+            subjects = CASE WHEN user_edited = 0 AND subjects = '[]' THEN ? ELSE subjects END,
+            details_at = ?
+          WHERE id = ?`)
           .run(doc?.ol_key ?? null, doc?.cover_id ?? null, doc?.pages ?? null, doc?.year ?? null, doc?.isbn ?? null,
             JSON.stringify(doc?.subjects ?? []), doc ? null : new Date().toISOString(), book.id);
       } catch (err) {

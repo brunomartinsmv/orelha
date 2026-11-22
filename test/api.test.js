@@ -11,7 +11,7 @@ process.env.ORELHA_NO_QUOTES = '1';
 
 const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
-const { parseCsv } = await import('../server/importers.js');
+const { parseCsv, normalizeDate, enrichImported } = await import('../server/importers.js');
 const { upsertFromOl } = await import('../server/library.js');
 
 const MAC = '100.64.0.10';
@@ -504,4 +504,166 @@ test('reimporta o próprio CSV do Orelha e restaura backup JSON completo de form
   // Recusa JSON inválido ou de outro formato.
   assert.equal((await call('POST', '/import', '{quebrado')).status, 400);
   assert.equal((await call('POST', '/import', JSON.stringify({ app: 'outro', books: [] }))).status, 400);
+});
+
+test('PATCH com ISBN inválido é atômico e alterar capa por ISBN limpa a cor anterior', async () => {
+  const book = await newBook('Título Original', { isbn: '9788500000301' });
+  await call('PATCH', `/books/${book.id}`, { color: '#112233' });
+  assert.equal((await call('GET', `/books/${book.id}`)).json.book.color, '#112233');
+
+  const bad = await call('PATCH', `/books/${book.id}`, { title: 'Não Deve Salvar', isbn: '123' });
+  assert.equal(bad.status, 400);
+  assert.equal((await call('GET', `/books/${book.id}`)).json.book.title, 'Título Original');
+
+  const ok = await call('PATCH', `/books/${book.id}`, { isbn: '9788500000302' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.color, null);
+});
+
+test('CSV malformado rejeita aspas abertas; datas BR e reimportação de leituras manuais/sem data funcionam', async () => {
+  assert.equal(normalizeDate('15/08/2024'), '2024-08-15');
+  assert.equal(normalizeDate('31/02/2024'), null);
+  assert.equal((await call('POST', '/import', 'Title,Author,Bookshelves\n"Aberto,Fulano,lido')).status, 400);
+
+  // Duas leituras sem data de término no banco de origem -> export CSV -> reimportar no mesmo banco não duplica.
+  const b = await newBook('Sem Data Duplo', { isbn: '9788500000401' });
+  await call('POST', `/books/${b.id}/logs`, { rating: 6, review: 'Primeira vez' });
+  await call('POST', `/books/${b.id}/logs`, { rating: 10, review: 'Segunda vez', reread: true });
+  // Leitura concluída com started_on antigo não pode vazar para shelf.started_on ao importar.
+  const bHist = await newBook('Histórico 2021', { isbn: '9788500000402' });
+  await call('POST', `/books/${bHist.id}/logs`, { rating: 8, started_on: '2021-01-10', finished_on: '2021-02-01' });
+
+  const csv = (await call('GET', '/export.csv')).text;
+  const sameDb = (await call('POST', '/import', csv)).json;
+  assert.equal(sameDb.logs_added, 0);
+  assert.equal((await call('GET', `/books/${b.id}`)).json.logs.length, 2);
+
+  // Em banco vazio, ambas as leituras sem data são preservadas e shelf.started_on fica nulo para livro lido.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const fresh = (await call('POST', '/import', csv)).json;
+  assert.ok(fresh.logs_added >= 3);
+  const [restoredDouble] = (await call('GET', '/shelf?status=read&q=Sem Data Duplo')).json;
+  assert.equal((await call('GET', `/books/${restoredDouble.id}`)).json.logs.length, 2);
+  const [restoredHist] = (await call('GET', '/shelf?status=read&q=Histórico 2021')).json;
+  assert.equal(restoredHist.started_on, null);
+
+  // Repetir a importação no banco recém-restaurado também não duplica.
+  assert.equal((await call('POST', '/import', csv)).json.logs_added, 0);
+
+  // Fallback de ISBN em CSV em português quando ISBN13 é inválido.
+  const ptFallback = `Título;Autor;ISBN13;ISBN10;Estante\nFallback BR;Autora;N/A;8535902775;quero-ler\n`;
+  assert.equal((await call('POST', '/import', ptFallback)).json.books_added, 1);
+  const [fb] = (await call('GET', '/shelf?status=want&q=Fallback BR')).json;
+  assert.equal(fb.isbn, '8535902775');
+});
+
+test('restauração JSON preserva identidades distintas, favoritos sem estante, cronologia, demo e user_edited', async () => {
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+
+  // Dois volumes com mesmo prefixo antes de ":", dois logs idênticos sem data, duas listas homônimas,
+  // livro favoritado sem estante, cronologia de notas sem finished_on, e um livro demo.
+  const vol1 = await newBook('Coleção: Volume I', { authors: 'Ana', isbn: '9788500000501' });
+  const vol2 = await newBook('Coleção: Volume II', { authors: 'Ana', isbn: '9788500000502' });
+  const favOnly = await newBook('Só Favorito');
+  await call('PUT', '/favorites/1', { book_id: favOnly.id });
+
+  await call('POST', `/books/${vol1.id}/logs`, { rating: 4 });
+  await call('POST', `/books/${vol1.id}/logs`, { rating: 4 });
+  // Leitura antiga (nota 4) vs mais recente (nota 10), ambas sem finished_on:
+  db.prepare(`INSERT INTO logs (book_id, rating, created_at) VALUES (?, 4, '2024-01-01 10:00:00')`).run(vol2.id);
+  db.prepare(`INSERT INTO logs (book_id, rating, created_at) VALUES (?, 10, '2025-06-01 10:00:00')`).run(vol2.id);
+  await call('PUT', `/books/${vol2.id}/shelf`, { status: 'read' });
+
+  const l1 = (await call('POST', '/lists', { title: 'Mesmo Nome', description: 'Primeira', ranked: true })).json;
+  const l2 = (await call('POST', '/lists', { title: 'Mesmo Nome', description: 'Segunda', ranked: false })).json;
+  await call('POST', `/lists/${l1.id}/items`, { book_id: vol1.id });
+  await call('POST', `/lists/${l2.id}/items`, { book_id: vol2.id });
+
+  const demoBook = await newBook('Livro Exemplo');
+  db.prepare(`INSERT INTO shelf (book_id, status, demo) VALUES (?, 'want', 1)`).run(demoBook.id);
+
+  // Livro vindo da OL editado pelo usuário no backup.
+  upsertFromOl({
+    ol_key: 'OL777777W', title: 'Original OL', title_is_pt: 0, original_title: null, subtitle: null,
+    authors: ['Autor'], year: 2000, pages: 150, isbn: null, cover_id: 99, subjects: ['Fantasy'],
+  });
+  await call('PATCH', '/books/OL777777W', { title: 'Título Editado', subjects: ['Mistério'] });
+  await call('PUT', '/books/OL777777W/shelf', { status: 'read' });
+
+  const backup = (await call('GET', '/export.json')).json;
+  assert.ok(backup.books.some((b) => b.id === favOnly.id), 'livro só em favorites entra no export');
+
+  // Limpa banco e coloca apenas o cache não-editado da OL para OL777777W.
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+  upsertFromOl({
+    ol_key: 'OL777777W', title: 'Original OL', title_is_pt: 0, original_title: null, subtitle: null,
+    authors: ['Autor'], year: 2000, pages: 150, isbn: null, cover_id: 99, subjects: ['Fantasy'],
+  });
+
+  const restored = (await call('POST', '/import', JSON.stringify(backup))).json;
+  assert.equal(restored.skipped, 0);
+  assert.equal((await call('GET', `/books/${vol1.id}`)).json.logs.length, 2);
+  assert.equal((await call('GET', `/books/${vol2.id}`)).json.book.rating, 10);
+  assert.equal((await call('GET', `/books/${favOnly.id}`)).json.favorite_slot, 1);
+  assert.equal((await call('GET', '/lists')).json.filter((l) => l.title === 'Mesmo Nome').length, 2);
+  assert.equal((await call('GET', '/home')).json.demo, true);
+
+  // A edição do backup prevalece sobre o cache não editado da OL.
+  const olRestored = (await call('GET', '/books/OL777777W')).json;
+  assert.equal(olRestored.book.title, 'Título Editado');
+  assert.deepEqual(olRestored.book.subjects, ['Mistério']);
+
+  // Segunda importação do mesmo backup é idempotente.
+  const second = (await call('POST', '/import', JSON.stringify(backup))).json;
+  assert.equal(second.books_added, 0);
+  assert.equal(second.logs_added, 0);
+  assert.equal(second.lists_added, 0);
+
+  // Se o leitor limpar sinopse/assuntos localmente (user_edited = 1), restaurar um backup antigo não repõe.
+  await call('PATCH', `/books/${vol1.id}`, { description: '', subjects: [] });
+  await call('POST', '/import', JSON.stringify({
+    ...backup,
+    books: backup.books.map((b) => (b.id === vol1.id ? { ...b, description: 'Voltou?', subjects: '["Fantasia"]' } : b)),
+  }));
+  const afterLocalClear = (await call('GET', `/books/${vol1.id}`)).json;
+  assert.equal(afterLocalClear.book.description, null);
+  assert.deepEqual(afterLocalClear.book.subjects, []);
+
+  // Referências órfãs (ex.: favorito de backup antigo sem livro) são contabilizadas em skipped.
+  const orphan = (await call('POST', '/import', JSON.stringify({
+    app: 'orelha',
+    books: [],
+    favorites: [{ slot: 4, book_id: 'inexistente' }],
+    lists: [{ title: 'Lista sem ID' }],
+    list_items: [{ book_id: vol1.id, position: 0 }],
+  }))).json;
+  assert.equal(orphan.skipped, 2);
+
+  // Enriquecimento em segundo plano respeita user_edited = 1 (não apaga subjects do leitor).
+  const imp = await newBook('Importado Editado', { subjects: ['Terror'] });
+  db.prepare(`UPDATE books SET source = 'import', details_at = NULL, ol_key = NULL WHERE id = ?`).run(imp.id);
+  const fields = 'key,title,subtitle,author_name,first_publish_year,cover_i,number_of_pages_median,isbn,subject,editions,editions.title,editions.cover_i,editions.language,editions.isbn,ratings_average,ratings_count,readinglog_count,author_alternative_name';
+  for (const [q, limit] of [['Importado Editado Fulana de Tal', '20'], ['Importado Editado Fulana de Tal language:por', '15']]) {
+    const params = new URLSearchParams({ q, limit, fields, lang: 'por' });
+    db.prepare('INSERT OR REPLACE INTO api_cache (key, value, expires_at) VALUES (?, ?, ?)').run(
+      `https://openlibrary.org/search.json?${params}`,
+      JSON.stringify({ docs: [{ key: '/works/OL888888W', title: 'Importado Editado', author_name: ['Fulana de Tal'], cover_i: 55, subject: ['Fantasy'] }] }),
+      Date.now() + 86_400_000,
+    );
+  }
+  delete process.env.ORELHA_NO_ENRICH;
+  try {
+    await enrichImported();
+  } finally {
+    process.env.ORELHA_NO_ENRICH = '1';
+  }
+  const enrichedRow = db.prepare('SELECT subjects, cover_id FROM books WHERE id = ?').get(imp.id);
+  assert.deepEqual(JSON.parse(enrichedRow.subjects), ['Terror']);
+  assert.equal(enrichedRow.cover_id, 55);
 });

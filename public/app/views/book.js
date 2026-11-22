@@ -49,16 +49,19 @@ function About({ book }) {
 
 function EditSheet({ book, onClose }) {
   const { data: allGenres } = useFetch('/genres');
-  const [form, setForm] = useState({
+  const initialForm = {
     title: book.title,
     authors: book.authors.join(', '),
     pages: book.pages ?? '',
     year: book.year ?? '',
     isbn: book.isbn ?? '',
     description: book.description ?? '',
-  });
-  const [genres, setGenres] = useState(() => book.genres || []);
-  const [otherSubjects, setOtherSubjects] = useState(() => (book.other_subjects || []).join(', '));
+  };
+  const initialGenres = book.genres || [];
+  const initialOther = (book.other_subjects || []).join(', ');
+  const [form, setForm] = useState(initialForm);
+  const [genres, setGenres] = useState(() => initialGenres);
+  const [otherSubjects, setOtherSubjects] = useState(initialOther);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   const toggleGenre = (id) => setGenres((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -72,15 +75,39 @@ function EditSheet({ book, onClose }) {
   };
   const save = async (e) => {
     e.preventDefault();
-    const labelById = new Map((allGenres || []).map((g) => [g.id, g.label]));
-    const genreLabels = genres.map((id) => labelById.get(id)).filter(Boolean);
-    const extras = otherSubjects.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-    const subjects = allGenres ? [...genreLabels, ...extras] : undefined;
+    const body = {};
+    for (const k of ['title', 'authors', 'pages', 'year', 'isbn', 'description']) {
+      if (String(form[k]) !== String(initialForm[k])) body[k] = form[k];
+    }
+    const genresChanged = genres.length !== initialGenres.length || genres.some((g) => !initialGenres.includes(g));
+    const otherChanged = otherSubjects !== initialOther;
+    if (genresChanged || otherChanged) {
+      const selectedSet = new Set(genres);
+      const removedSet = new Set(initialGenres.filter((g) => !selectedSet.has(g)));
+      const origSubjects = book.subjects || [];
+      const origMatches = book.subject_genres || [];
+      // Preserva as etiquetas originais dos gêneros mantidos (ex.: múltiplas etiquetas da OL).
+      const keptGenreTerms = [];
+      const covered = new Set();
+      origSubjects.forEach((term, i) => {
+        const ids = origMatches[i] || [];
+        if (!ids.length) return;
+        if (ids.some((id) => removedSet.has(id))) return;
+        if (ids.some((id) => selectedSet.has(id))) {
+          keptGenreTerms.push(term);
+          ids.forEach((id) => covered.add(id));
+        }
+      });
+      const labelById = new Map((allGenres || []).map((g) => [g.id, g.label]));
+      const addedGenreTerms = genres.filter((id) => !covered.has(id)).map((id) => labelById.get(id)).filter(Boolean);
+      const extras = otherChanged
+        ? otherSubjects.split(/[,;]/).map((s) => s.trim()).filter(Boolean)
+        : (book.other_subjects || []);
+      body.subjects = [...keptGenreTerms, ...addedGenreTerms, ...extras];
+    }
+    if (!Object.keys(body).length) { onClose(); return; }
     setSaving(true);
-    const ok = await act(
-      () => api(`/books/${encodeURIComponent(book.id)}`, { method: 'PATCH', body: { ...form, ...(subjects !== undefined ? { subjects } : {}) } }),
-      'Livro atualizado.',
-    );
+    const ok = await act(() => api(`/books/${encodeURIComponent(book.id)}`, { method: 'PATCH', body }), 'Livro atualizado.');
     setSaving(false);
     if (ok) onClose();
   };
@@ -96,7 +123,7 @@ function EditSheet({ book, onClose }) {
       </div>
       <label class="field"><span>ISBN</span><input class="input" placeholder="10 ou 13 dígitos" value=${form.isbn} onInput=${set('isbn')} /></label>
       <label class="field"><span>Sinopse</span><textarea class="input" rows="4" value=${form.description} onInput=${set('description')}></textarea></label>
-      <${GenrePicker} selected=${genres} onToggle=${toggleGenre} other=${otherSubjects} onOther=${setOtherSubjects} />
+      <${GenrePicker} genres=${allGenres} selected=${genres} onToggle=${toggleGenre} other=${otherSubjects} onOther=${setOtherSubjects} />
       <div class="sticky-save">
         <button class="btn primary block" disabled=${saving}>${saving ? 'Salvando…' : 'Salvar'}</button>
       </div>
