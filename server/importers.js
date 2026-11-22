@@ -46,7 +46,15 @@ export function parseCsv(text) {
     .map((r) => Object.fromEntries(header.map((h, i) => [h.trim(), r[i] ?? ''])));
 }
 
-const norm = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+// Remove apenas diacríticos combinantes sobre letras latinas e recompõe em NFC:
+// preserva distinções de outros alfabetos (ex.: パン vs バン, Й vs И) mantendo equivalência NFC/NFD.
+const norm = (s) => String(s || '')
+  .normalize('NFD')
+  .replace(/(\p{Script=Latin})[\u0300-\u036f]+/gu, '$1')
+  .normalize('NFC')
+  .toLowerCase()
+  .replace(/[^\p{L}\p{N}\p{M}]+/gu, ' ')
+  .trim();
 
 // Goodreads exporta ISBN como ="9781234567890".
 const cleanIsbn = (v) => {
@@ -292,7 +300,8 @@ function findBook(item) {
   }
   if (!item.title) return null;
   const prefix = item.title.split(/[:(]/)[0].trim() || item.title.trim();
-  const candidates = db.prepare('SELECT id, title, authors, isbn FROM books WHERE title LIKE ?').all(`${prefix}%`);
+  const candidates = db.prepare('SELECT id, title, authors, isbn FROM books WHERE title LIKE ? OR title LIKE ?')
+    .all(`${prefix.normalize('NFC')}%`, `${prefix.normalize('NFD')}%`);
   const author = norm(item.authors?.[0] || '');
   return candidates.find((c) => {
     if (item.isbn && c.isbn && item.isbn !== c.isbn) return false;
@@ -367,13 +376,22 @@ export function importCsv(text) {
           reread: item.reread ? 1 : 0,
           format: item.format ?? null,
         };
-        const baseKey = createHash('sha1').update(`${norm(title)}|${norm(authors[0] || '')}|${finishedOn || ''}`).digest('hex');
+        const legacyKey = createHash('sha1').update(`${norm(title)}|${norm(authors[0] || '')}|${finishedOn || ''}`).digest('hex');
+        // Leituras sem data incluem traços que distinguem ocorrências vindas de arquivos diferentes
+        // (sem incluir a nota, para preservar edições de estrelas feitas no Orelha).
+        const baseKey = finishedOn
+          ? legacyKey
+          : createHash('sha1').update(`${legacyKey}|${startedOn || ''}|${incoming.reread}|${incoming.format || ''}|${norm(review || '')}`).digest('hex');
         const occ = (keyOccurrences.get(baseKey) || 0) + 1;
         keyOccurrences.set(baseKey, occ);
         const importKey = occ === 1 ? baseKey : createHash('sha1').update(`${baseKey}#${occ}`).digest('hex');
 
         const candidates = preexistingLogsByBook.get(bookId) || [];
         const match = candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === importKey)
+          || (occ === 1 && !finishedOn
+            ? candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === legacyKey
+              && Boolean(c.reread) === Boolean(incoming.reread) && (c.review ?? null) === incoming.review)
+            : null)
           || candidates.find((c) => !usedLogIds.has(c.id) && sameLogContent(c, incoming));
         if (match) {
           usedLogIds.add(match.id);
@@ -622,10 +640,9 @@ export function importOrelhaJson(data) {
       const createdAt = safeTimestamp(l.created_at);
 
       const match = preexistingLogs.find((c) => {
-        if (usedLogIds.has(c.id)) return false;
+        if (usedLogIds.has(c.id) || c.book_id !== bookId) return false;
         if (importKey && c.import_key === importKey) return true;
-        return c.book_id === bookId
-          && (c.finished_on ?? null) === finishedOn
+        return (c.finished_on ?? null) === finishedOn
           && (c.started_on ?? null) === startedOn
           && (c.rating ?? null) === rating
           && (c.review ?? null) === review

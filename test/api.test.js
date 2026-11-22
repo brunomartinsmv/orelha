@@ -725,4 +725,42 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   const [restoredReread] = (await call('GET', '/shelf?status=reading&q=Releitura 2026')).json;
   assert.notEqual(restoredReread.started_on, '2021-01-05');
   assert.equal((await call('GET', `/books/${restoredReread.id}`)).json.logs[0].started_on, '2021-01-05');
+
+  // 6) import_key de outra edição no JSON não omite a leitura da edição restaurada.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const ed1Csv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000701,read,4,Resenha Ed1\n`;
+  const ed2Csv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000702,read,5,Resenha Ed2\n`;
+  await call('POST', '/import', ed1Csv);
+  const ed1Backup = (await call('GET', '/export.json')).json;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', ed2Csv);
+  const mergedEd = (await call('POST', '/import', JSON.stringify(ed1Backup))).json;
+  assert.equal(mergedEd.books_added, 1);
+  assert.equal(mergedEd.logs_added, 1);
+  const restoredEd1 = (await call('GET', `/books/${ed1Backup.books[0].id}`)).json;
+  assert.equal(restoredEd1.logs.length, 1);
+  assert.equal(restoredEd1.logs[0].review, 'Resenha Ed1');
+
+  // 7) Dois CSVs com leituras sem data distintas (resenhas/releitura diferentes) mantêm ambas.
+  const csvA = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,4,,Primeira\n`;
+  const csvB = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,5,sim,Segunda\n`;
+  assert.equal((await call('POST', '/import', csvA)).json.logs_added, 1);
+  assert.equal((await call('POST', '/import', csvB)).json.logs_added, 1);
+  assert.equal((await call('POST', '/import', csvB)).json.logs_added, 0);
+
+  // 8) Marcas Unicode não latinas (パン vs バン) distinguem livros, mas NFC e NFD equivalem.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const pan = await newBook('パン', { authors: '佐藤' });
+  await call('POST', `/books/${pan.id}/logs`, { rating: 8, review: 'Sobre pão' });
+  const panBackup = (await call('GET', '/export.json')).json;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const ban = await newBook('バン', { authors: '佐藤' });
+  await call('POST', `/books/${ban.id}/logs`, { rating: 6, review: 'Sobre van' });
+  const panMerged = (await call('POST', '/import', JSON.stringify(panBackup))).json;
+  assert.equal(panMerged.books_added, 1);
+  assert.equal((await call('GET', `/books/${ban.id}`)).json.logs.length, 1);
+  assert.equal((await call('GET', `/books/${pan.id}`)).json.logs[0].review, 'Sobre pão');
+  // NFC e NFD do mesmo título japonês não duplicam no CSV.
+  const nfdCsv = `Title,Author,Bookshelves,Date Read\n${'パン'.normalize('NFD')},佐藤,read,2025-05-01\n`;
+  assert.equal((await call('POST', '/import', nfdCsv)).json.books_added, 0);
 });
