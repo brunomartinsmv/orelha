@@ -1,5 +1,6 @@
 import { html, render, useEffect, useState } from '/vendor/htm-preact.js';
-import { initRouter, onOffline, useRoute } from './lib.js';
+import { initRouter, initSync, onOffline, plural, syncNow, useRoute, useSyncState } from './lib.js';
+import { SyncSheet } from './sheets.js';
 import { Icon, ThemeToggle, Toaster } from './ui.js';
 import { HomeView } from './views/home.js';
 import { SearchView } from './views/search.js';
@@ -61,9 +62,45 @@ function settleViewport() {
   }
 }
 
+function SyncStatusPill({ offline, onOpen }) {
+  const { syncing, blockedItem, pendingCount } = useSyncState();
+  if (!offline && !pendingCount) return null;
+
+  const hasError = !!blockedItem;
+  const cls = `offline-pill sync-pill ${hasError ? 'has-error' : pendingCount ? 'has-pending' : ''}`;
+
+  let label;
+  if (blockedItem?.state === 'conflict') {
+    label = 'Conflito na sincronização · revisar';
+  } else if (blockedItem?.state === 'error') {
+    label = 'Falha ao sincronizar · revisar';
+  } else if (syncing) {
+    label = 'Sincronizando…';
+  } else if (pendingCount > 0) {
+    label = offline
+      ? `Sem conexão · ${plural(pendingCount, 'pendente', 'pendentes')}`
+      : `${plural(pendingCount, 'alteração aguardando', 'alterações aguardando')} sincronização`;
+  } else {
+    label = 'Sem conexão · página, trechos e status ficam na fila';
+  }
+
+  if (!pendingCount) {
+    return html`<div class=${cls} role="status">${label}</div>`;
+  }
+
+  return html`<div class=${cls} role="status">
+    <button type="button" class="sync-pill-main" onClick=${onOpen}>
+      <span class="sync-dot" aria-hidden="true"></span>
+      <span>${label}</span>
+    </button>
+    ${!hasError && !syncing && html`<button type="button" class="sync-pill-btn" onClick=${() => syncNow()}>Sincronizar</button>`}
+  </div>`;
+}
+
 function App() {
   const { path, search } = useRoute();
   const [offline, setOffline] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
   useEffect(() => onOffline(setOffline), []);
   useEffect(() => {
     const kick = () => requestAnimationFrame(settleViewport);
@@ -84,15 +121,18 @@ function App() {
   }, []);
   const { view: View, props, tab, key } = match(path);
   return html`<div class="app">
-    ${offline && html`<div class="offline-pill" role="status">Sem conexão com o servidor: só leitura, última cópia</div>`}
+    <${SyncStatusPill} offline=${offline} onOpen=${() => setSyncOpen(true)} />
     <${View} key=${key || path} search=${search} ...${props} />
     <${TabBar} tab=${tab} />
+    ${syncOpen && html`<${SyncSheet} onClose=${() => setSyncOpen(false)} />`}
     <${Toaster} />
   </div>`;
 }
 
 initRouter();
-render(html`<${App} />`, document.getElementById('root'));
+initSync().catch(() => {}).finally(() => {
+  render(html`<${App} />`, document.getElementById('root'));
+});
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => { /* só disponível em HTTPS ou localhost */ });

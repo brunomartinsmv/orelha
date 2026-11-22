@@ -1,8 +1,18 @@
-import { useEffect, useState } from '/vendor/htm-preact.js';
+import { useEffect, useMemo, useState } from '/vendor/htm-preact.js';
+import {
+  affectedPathsForOp,
+  applyPendingToPath,
+  classifyHttpResponse,
+  createIndexedDbStore,
+  createMemoryStore,
+  createStorageLock,
+  createSyncEngine,
+  patchDataWithConfirmed,
+} from './sync.js';
 
 // ---------- API ----------
 
-const listeners = { invalidate: new Set(), route: new Set(), toast: new Set(), offline: new Set(), theme: new Set() };
+const listeners = { invalidate: new Set(), patch: new Set(), route: new Set(), toast: new Set(), offline: new Set(), theme: new Set() };
 const emit = (name, value) => listeners[name].forEach((fn) => fn(value));
 const subscribe = (name, fn) => { listeners[name].add(fn); return () => listeners[name].delete(fn); };
 
@@ -11,7 +21,7 @@ function setOffline(value) {
   if (value !== isOffline) { isOffline = value; emit('offline', value); }
 }
 
-export async function api(path, { method = 'GET', body, raw, signal } = {}) {
+async function apiDetailed(path, { method = 'GET', body, raw, signal } = {}) {
   let res;
   // Com o servidor fora do ar o Tailscale não recusa a conexão, ela só fica pendurada: precisa de prazo.
   const deadline = AbortSignal.timeout(raw ? 120_000 : 25_000);
@@ -27,9 +37,15 @@ export async function api(path, { method = 'GET', body, raw, signal } = {}) {
     setOffline(true);
     throw new Error('Sem conexão com o servidor. Ele está ligado e o Tailscale conectado?');
   }
-  setOffline(res.headers.get('X-Orelha-Offline') === '1');
+  const fromCache = res.headers.get('X-Orelha-Offline') === '1';
+  setOffline(fromCache);
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error(data?.error || 'Algo deu errado.');
+  return { data, fromCache };
+}
+
+export async function api(path, opts) {
+  const { data } = await apiDetailed(path, opts);
   return data;
 }
 
@@ -39,21 +55,281 @@ export const invalidate = () => emit('invalidate');
 // Mostra a última resposta na hora e revalida ao montar ou após qualquer mudança.
 const memory = new Map();
 
-export function useFetch(path) {
-  const [state, setState] = useState(() => ({ data: path ? memory.get(path) : undefined, error: null, loading: !!path }));
-  const [version, setVersion] = useState(0);
-  useEffect(() => subscribe('invalidate', () => setVersion((v) => v + 1)), []);
+// ---------- Fila de sincronização offline ----------
+
+const tabId = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const LOCK_KEY = 'orelha.sync.lock';
+const PING_KEY = 'orelha.sync.ping';
+const BACKOFF_MS = [5_000, 10_000, 20_000, 30_000, 60_000];
+let backoffStep = 0;
+let retryTimer = null;
+let syncChannel = null;
+let syncInitialized = false;
+
+function makeStore() {
+  if (typeof indexedDB !== 'undefined') return createIndexedDbStore('orelha-offline');
+  return createMemoryStore();
+}
+
+async function browserTransport({ method, path, body }) {
+  const res = await fetch(`/api${path}`, {
+    method,
+    signal: AbortSignal.timeout(8_000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => null);
+  return classifyHttpResponse(res, data);
+}
+
+// Outra aba está drenando: tenta de novo depois, senão a fila só andaria no próximo evento.
+let storageLock = (fn) => fn();
+try {
+  // Ler `localStorage` já pode lançar em contextos com armazenamento bloqueado.
+  if (typeof localStorage !== 'undefined') {
+    storageLock = createStorageLock({ storage: localStorage, ownerId: tabId, key: LOCK_KEY, onBusy: () => setTimeout(() => scheduleRetry(), 0) });
+  }
+} catch { /* sem armazenamento: segue sem trava */ }
+
+async function browserLock(fn) {
+  if (navigator?.locks?.request) {
+    return navigator.locks.request('orelha-sync', fn);
+  }
+  return storageLock(fn);
+}
+
+function broadcastSync() {
+  if (syncChannel) {
+    try { syncChannel.postMessage({ source: tabId, at: Date.now() }); } catch { /* canal fechado */ }
+    return;
+  }
+  try { localStorage.setItem(PING_KEY, `${tabId}:${Date.now()}`); } catch { /* modo privado */ }
+}
+
+async function revalidateAffectedCaches(confirmedOps) {
+  if (!confirmedOps?.length || typeof caches === 'undefined') return;
+  try {
+    const dataKeys = (await caches.keys()).filter((k) => k.endsWith('-data'));
+    if (!dataKeys.length) return;
+    const opened = await Promise.all(dataKeys.map((k) => caches.open(k)));
+    const paths = new Set(confirmedOps.flatMap(affectedPathsForOp));
+    await Promise.all([...paths].map(async (path) => {
+      const reqUrl = `/api${path}`;
+      const matched = await Promise.all(opened.map((cache) => cache.match(reqUrl)));
+      if (matched.some(Boolean)) {
+        await fetch(reqUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => {});
+      }
+    }));
+  } catch { /* revalidação em segundo plano */ }
+}
+
+const sync = createSyncEngine({
+  store: makeStore(),
+  transport: browserTransport,
+  lock: browserLock,
+  broadcast: broadcastSync,
+  onStatusChange: ({ offline }) => {
+    if (typeof offline === 'boolean') setOffline(offline);
+  },
+  onItemConfirmed: (item, serverResult) => {
+    setOffline(false);
+    for (const [path, entry] of memory.entries()) {
+      const patched = patchDataWithConfirmed(path, entry.data, item, serverResult);
+      if (patched !== entry.data) memory.set(path, { data: patched, fromCache: false });
+    }
+    emit('patch');
+  },
+  onDrained: (confirmedOps) => {
+    invalidate();
+    revalidateAffectedCaches(confirmedOps);
+  },
+});
+
+function clearRetryTimer() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+function scheduleRetry(state = sync.getState()) {
+  clearRetryTimer();
+  if (!state.pendingCount || state.blockedItem || state.syncing) return;
+  if (document.visibilityState !== 'visible' || navigator.onLine === false) return;
+  const delay = BACKOFF_MS[Math.min(backoffStep, BACKOFF_MS.length - 1)];
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    const current = sync.getState();
+    if (!current.pendingCount || current.blockedItem || document.visibilityState !== 'visible') return;
+    backoffStep = Math.min(backoffStep + 1, BACKOFF_MS.length - 1);
+    sync.flush({ reason: 'timer' }).catch(() => {});
+  }, delay);
+}
+
+// Outra aba mexeu na fila: recarrega os itens e os dados, para que uma confirmação feita lá
+// não faça esta aba voltar a mostrar a versão antiga (e gerar conflito falso na próxima edição).
+function refreshFromOtherTab() {
+  sync.reloadFromStore().catch(() => {}).finally(() => invalidate());
+}
+
+export async function initSync() {
+  if (syncInitialized) return sync.getState();
+  syncInitialized = true;
+
+  if (typeof BroadcastChannel !== 'undefined') {
+    try {
+      syncChannel = new BroadcastChannel('orelha-sync');
+      syncChannel.addEventListener('message', (event) => {
+        if (event.data?.source !== tabId) refreshFromOtherTab();
+      });
+    } catch { syncChannel = null; }
+  }
+  window.addEventListener('storage', (event) => {
+    if (event.key === PING_KEY) refreshFromOtherTab();
+  });
+
+  sync.subscribe((state) => {
+    if (!state.pendingCount || state.blockedItem) {
+      backoffStep = 0;
+      clearRetryTimer();
+      return;
+    }
+    if (!state.syncing) scheduleRetry(state);
+  });
+
+  const resume = (reason) => {
+    backoffStep = 0;
+    clearRetryTimer();
+    const state = sync.getState();
+    if (state.pendingCount > 0 && !state.blockedItem) {
+      sync.flush({ reason }).catch(() => {});
+    } else if (reason === 'online' || (reason === 'focus' && isOffline)) {
+      invalidate();
+    }
+  };
+
+  window.addEventListener('online', () => resume('online'));
+  window.addEventListener('focus', () => resume('focus'));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') resume('visible');
+    else clearRetryTimer();
+  });
+
+  let state;
+  try {
+    state = await sync.init();
+  } catch {
+    return sync.getState();
+  }
+  if (state.pendingCount > 0 && !state.blockedItem) {
+    sync.flush({ reason: 'startup' }).catch(() => {});
+  }
+  return state;
+}
+
+export function useSyncState() {
+  const [state, setState] = useState(() => sync.getState());
   useEffect(() => {
-    if (!path) { setState({ data: undefined, error: null, loading: false }); return undefined; }
+    setState(sync.getState());
+    return sync.subscribe(setState);
+  }, []);
+  return state;
+}
+
+const fastWait = () => (navigator.onLine === false || isOffline ? 0 : 1200);
+
+export function queueProgress(book, { page, on_day }) {
+  backoffStep = 0;
+  return sync.enqueue({
+    kind: 'progress',
+    book,
+    payload: { page, on_day },
+    expected: { status: book.status ?? null, current_page: book.current_page ?? null },
+    waitMs: fastWait(),
+  });
+}
+
+export function queueQuote(book, { text, page }) {
+  backoffStep = 0;
+  return sync.enqueue({
+    kind: 'quote',
+    book,
+    payload: { text, page },
+    expected: null,
+    waitMs: fastWait(),
+  });
+}
+
+export function queueShelfStatus(book, status) {
+  backoffStep = 0;
+  return sync.enqueue({
+    kind: 'shelf',
+    book,
+    payload: { status, on_day: localDate() },
+    expected: { status: book.status ?? null, current_page: book.current_page ?? null },
+    waitMs: fastWait(),
+  });
+}
+
+export function syncNow() {
+  backoffStep = 0;
+  clearRetryTimer();
+  return sync.flush({ reason: 'manual' });
+}
+
+export function retrySyncItem(seq, opts) {
+  backoffStep = 0;
+  clearRetryTimer();
+  return sync.retryItem(seq, opts);
+}
+
+export function discardSyncItem(seq) {
+  backoffStep = 0;
+  clearRetryTimer();
+  return sync.discardItem(seq);
+}
+
+export function useFetch(path) {
+  const syncState = useSyncState();
+  const [state, setState] = useState(() => ({
+    raw: path ? memory.get(path)?.data : undefined,
+    error: null,
+    loading: !!path,
+  }));
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => subscribe('invalidate', () => setVersion((v) => v + 1)), []);
+  useEffect(() => subscribe('patch', () => {
+    if (!path) return;
+    const entry = memory.get(path);
+    if (entry) setState((s) => (s.raw === entry.data ? s : { ...s, raw: entry.data }));
+  }), [path]);
+
+  useEffect(() => {
+    if (!path) { setState({ raw: undefined, error: null, loading: false }); return undefined; }
     const controller = new AbortController();
-    const cached = memory.get(path);
-    setState((s) => ({ data: cached ?? (version ? s.data : undefined), error: null, loading: true }));
-    api(path, { signal: controller.signal })
-      .then((data) => { memory.set(path, data); setState({ data, error: null, loading: false }); })
+    const cached = memory.get(path)?.data;
+    setState((s) => ({ raw: cached ?? (version ? s.raw : undefined), error: null, loading: true }));
+    apiDetailed(path, { signal: controller.signal })
+      .then(({ data, fromCache }) => {
+        const prev = memory.get(path);
+        if (fromCache && prev && !prev.fromCache) {
+          setState({ raw: prev.data, error: null, loading: false });
+          return;
+        }
+        memory.set(path, { data, fromCache });
+        setState({ raw: data, error: null, loading: false });
+      })
       .catch((error) => { if (error.name !== 'AbortError') setState((s) => ({ ...s, error, loading: false })); });
     return () => controller.abort();
   }, [path, version]);
-  return state;
+
+  const data = useMemo(
+    () => (state.raw ? applyPendingToPath(path, state.raw, syncState.items) : state.raw),
+    [path, state.raw, syncState.items],
+  );
+
+  return { data, error: state.error, loading: state.loading };
 }
 
 // ---------- Rotas ----------

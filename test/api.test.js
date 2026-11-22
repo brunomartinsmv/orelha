@@ -1161,3 +1161,128 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.deepEqual(s2020.top, []);
   assert.ok(s2020.ratings.every((n) => n === 0));
 });
+
+test('op_id evita duplicatas ao reenviar progresso, trechos e estante', async () => {
+  const book = await newBook('Livro Idempotente', { pages: 240 });
+
+  const shelf1 = await call('PUT', `/books/${book.id}/shelf`, {
+    status: 'reading',
+    on_day: '2026-11-20',
+    op_id: 'op-shelf-1',
+    expected: { status: null, current_page: null },
+  });
+  assert.equal(shelf1.status, 200);
+  assert.equal(shelf1.json.status, 'reading');
+  assert.equal(shelf1.json.started_on, '2026-11-20');
+
+  // Reenvio idêntico não falha no expected nem muda started_on.
+  const shelfReplay = await call('PUT', `/books/${book.id}/shelf`, {
+    status: 'reading',
+    on_day: '2026-11-22',
+    op_id: 'op-shelf-1',
+    expected: { status: null, current_page: null },
+  });
+  assert.equal(shelfReplay.status, 200);
+  assert.deepEqual(shelfReplay.json, shelf1.json);
+
+  const prog1 = await call('POST', `/books/${book.id}/progress`, {
+    page: 45,
+    on_day: '2026-11-20',
+    op_id: 'op-prog-1',
+    expected: { status: 'reading', current_page: null },
+  });
+  const prog2 = await call('POST', `/books/${book.id}/progress`, {
+    page: 45,
+    on_day: '2026-11-20',
+    op_id: 'op-prog-1',
+    expected: { status: 'reading', current_page: null },
+  });
+  assert.equal(prog1.status, 200);
+  assert.equal(prog2.status, 200);
+  assert.deepEqual(prog2.json, prog1.json);
+  const progressRows = db.prepare('SELECT COUNT(*) AS n FROM progress WHERE book_id = ?').get(book.id).n;
+  assert.equal(progressRows, 1);
+
+  const quote1 = await call('POST', `/books/${book.id}/quotes`, {
+    text: 'Frase guardada sem conexão.',
+    page: 45,
+    op_id: 'op-quote-1',
+  });
+  const quote2 = await call('POST', `/books/${book.id}/quotes`, {
+    text: 'Frase guardada sem conexão.',
+    page: 45,
+    op_id: 'op-quote-1',
+  });
+  assert.equal(quote1.status, 200);
+  assert.equal(quote2.status, 200);
+  assert.equal(quote2.json.id, quote1.json.id);
+  const quoteRows = db.prepare('SELECT COUNT(*) AS n FROM quotes WHERE book_id = ?').get(book.id).n;
+  assert.equal(quoteRows, 1);
+
+  // Reutilizar o mesmo op_id para outro livro ou tipo devolve 409 op_mismatch.
+  const other = await newBook('Outro Livro Op');
+  const mismatch = await call('POST', `/books/${other.id}/quotes`, { text: 'Outro', op_id: 'op-quote-1' });
+  assert.equal(mismatch.status, 409);
+  assert.equal(mismatch.json.code, 'op_mismatch');
+});
+
+test('expected detecta conflito entre aparelhos em progresso e status', async () => {
+  const book = await newBook('Livro Conflito', { pages: 300 });
+  await call('PUT', `/books/${book.id}/shelf`, { status: 'reading', on_day: '2026-11-20' });
+  await call('POST', `/books/${book.id}/progress`, { page: 50, on_day: '2026-11-20' });
+
+  // Outro aparelho atualizou para a página 80.
+  await call('POST', `/books/${book.id}/progress`, { page: 80, on_day: '2026-11-21' });
+
+  const staleProgress = await call('POST', `/books/${book.id}/progress`, {
+    page: 60,
+    on_day: '2026-11-21',
+    op_id: 'op-stale-prog',
+    expected: { status: 'reading', current_page: 50 },
+  });
+  assert.equal(staleProgress.status, 409);
+  assert.equal(staleProgress.json.code, 'conflict');
+  assert.equal(staleProgress.json.current.current_page, 80);
+
+  const staleShelf = await call('PUT', `/books/${book.id}/shelf`, {
+    status: 'want',
+    op_id: 'op-stale-shelf',
+    expected: { status: 'reading', current_page: 50 },
+  });
+  assert.equal(staleShelf.status, 409);
+  assert.equal(staleShelf.json.code, 'conflict');
+  assert.equal(staleShelf.json.current.current_page, 80);
+
+  // Sem expected (forçar aplicação) e com expected atualizado funciona normalmente.
+  const forced = await call('POST', `/books/${book.id}/progress`, {
+    page: 95,
+    on_day: '2026-11-22',
+    op_id: 'op-stale-prog',
+  });
+  assert.equal(forced.status, 200);
+  assert.equal(forced.json.current_page, 95);
+
+  const matchedShelf = await call('PUT', `/books/${book.id}/shelf`, {
+    status: 'dropped',
+    op_id: 'op-match-shelf',
+    expected: { status: 'reading', current_page: 95 },
+  });
+  assert.equal(matchedShelf.status, 200);
+  assert.equal(matchedShelf.json.status, 'dropped');
+});
+
+test('abandono sincronizado da fila offline usa on_day como data, e dropped_on explícito prevalece', async () => {
+  const queued = await newBook('Abandono Offline');
+  const res = await call('PUT', `/books/${queued.id}/shelf`, {
+    status: 'dropped',
+    on_day: '2025-12-31',
+    op_id: 'op-drop-offline',
+    expected: { status: null, current_page: null },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(db.prepare('SELECT dropped_on FROM drops WHERE book_id = ?').get(queued.id).dropped_on, '2025-12-31');
+
+  const explicit = await newBook('Abandono Com Data');
+  await call('PUT', `/books/${explicit.id}/shelf`, { status: 'dropped', on_day: '2026-01-02', dropped_on: '2025-06-01' });
+  assert.equal(db.prepare('SELECT dropped_on FROM drops WHERE book_id = ?').get(explicit.id).dropped_on, '2025-06-01');
+});

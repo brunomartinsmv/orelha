@@ -65,9 +65,12 @@ export function QuotesView() {
       <p>Na página de qualquer livro, toque em “Guardar trecho”.</p>
     </div>`}
     <div style="margin-top:10px">
-      ${(data || []).map((q) => html`<div key=${q.id} class="quote-item">
+      ${(data || []).map((q) => html`<div key=${q.id} class=${`quote-item ${q.pending ? 'pending' : ''}`}>
         <blockquote>${q.text}</blockquote>
-        <div class="quote-foot"><a href=${`/livro/${encodeURIComponent(q.book.id)}`}>${q.book.title}${q.page ? `, p. ${q.page}` : ''}</a></div>
+        <div class="quote-foot">
+          <a href=${`/livro/${encodeURIComponent(q.book.id)}`}>${q.book.title}${q.page ? `, p. ${q.page}` : ''}</a>
+          ${q.pending && html`<span>aguardando sincronização</span>`}
+        </div>
       </div>`)}
     </div>
   </main>`;

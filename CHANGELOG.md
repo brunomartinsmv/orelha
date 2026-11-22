@@ -19,6 +19,7 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Edição de ISBN, sinopse e gêneros/assuntos no formulário "Ajustar livro" e no cadastro manual (`GET /api/genres`, `PATCH /api/books/:id`, `POST /api/books`), preservando alterações manuais contra sobrescrita pela Open Library.
 - Importação de CSVs exportados do Skoob (formato Goodreads com `Bookshelves` ou colunas em português, datas `DD/MM/YYYY`, notas com vírgula e separador `;`), reimportação do CSV exportado pelo Orelha e restauração idempotente de backups JSON (`/api/export.json`) pela tela de Ajustes.
 - Números da leitura expandidos (`GET /api/stats` e `/numeros`): alternância Livros/Páginas na linha do tempo com eixo Y, distribuição por gênero literário e por formato (`papel`, `e-book`, `áudio`), títulos por década ao interagir, contagem de releituras e histórico datado de abandonos (`drops`), notas de favoritos calculadas pela maior nota no período selecionado e modo **Retrospectiva** ("Seu ano em livros") para anos específicos.
+- Fila local em IndexedDB no PWA (`public/app/sync.js`) para atualizar página atual, guardar trechos e alterar status na estante offline ou quando o servidor está indisponível, com atualização otimista na interface, sincronização automática em ordem e idempotente (`op_id` na tabela `sync_ops`), detecção de conflitos entre aparelhos (`409`) e folha para revisar, forçar ou descartar pendências.
 
 ### Modificado
 

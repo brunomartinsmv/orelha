@@ -6,9 +6,10 @@ import * as rec from './recommend.js';
 import { dailyQuote } from './quotations.js';
 
 export class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra = null) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
 }
 
@@ -318,13 +319,68 @@ function preserveLegacyDrop(bookId, prevStatus) {
   if (!hasDrop) db.prepare('INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, NULL, NULL)').run(bookId);
 }
 
+function parseOpId(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (typeof raw !== 'string' || !raw.trim() || raw.length > 128) {
+    throw new HttpError(400, 'Identificador de sincronização inválido.');
+  }
+  return raw.trim();
+}
+
+function findSyncOp(opId, kind, bookId) {
+  if (!opId) return null;
+  const row = db.prepare('SELECT kind, book_id, response_json FROM sync_ops WHERE op_id = ?').get(opId);
+  if (!row) return null;
+  if (row.kind !== kind || row.book_id !== bookId) {
+    throw new HttpError(409, 'Esta operação já foi usada para outro livro ou ação.', { code: 'op_mismatch' });
+  }
+  return JSON.parse(row.response_json);
+}
+
+// Uma resposta perdida é reenviada pela fila em minutos ou dias; 30 dias cobrem isso com folga
+// sem deixar `sync_ops` crescer para sempre.
+const SYNC_OPS_TTL_DAYS = 30;
+const SYNC_OPS_PRUNE_EVERY_MS = 60 * 60 * 1000;
+let lastSyncOpsPrune = 0;
+
+export function pruneSyncOps(days = SYNC_OPS_TTL_DAYS) {
+  lastSyncOpsPrune = Date.now();
+  return db.prepare(`DELETE FROM sync_ops WHERE created_at < datetime('now', ?)`).run(`-${days} days`).changes;
+}
+
+function saveSyncOp(opId, kind, bookId, response) {
+  if (!opId) return;
+  if (Date.now() - lastSyncOpsPrune > SYNC_OPS_PRUNE_EVERY_MS) pruneSyncOps();
+  db.prepare('INSERT INTO sync_ops (op_id, kind, book_id, response_json) VALUES (?, ?, ?, ?)')
+    .run(opId, kind, bookId, JSON.stringify(response));
+}
+
+function checkShelfConflict(bookRow, expected) {
+  if (!expected || typeof expected !== 'object') return;
+  const actualStatus = bookRow.status ?? null;
+  const expStatus = expected.status === undefined ? actualStatus : (expected.status ?? null);
+  const actualPage = bookRow.current_page ?? null;
+  const expPage = expected.current_page === undefined ? actualPage : (expected.current_page ?? null);
+  if (actualStatus !== expStatus || actualPage !== expPage) {
+    throw new HttpError(409, 'Este livro foi alterado em outro aparelho antes da sincronização.', {
+      code: 'conflict',
+      current: presentBook(bookRow),
+    });
+  }
+}
+
 export function updateShelf(bookId, body) {
-  requireBook(bookId);
+  const opId = parseOpId(body.op_id);
+  const onDay = asDate(body.on_day);
   const VALID = ['want', 'reading', 'read', 'dropped', null];
   if (body.status !== undefined && !VALID.includes(body.status)) throw new HttpError(400, 'Status inválido.');
   const explicitStartedOn = body.started_on !== undefined ? asDate(body.started_on) : undefined;
   const explicitDroppedOn = body.dropped_on !== undefined ? asDate(body.dropped_on) : undefined;
   return transaction(() => {
+    const replayed = findSyncOp(opId, 'shelf', bookId);
+    if (replayed) return replayed;
+    const existing = requireBook(bookId);
+    checkShelfConflict(existing, body.expected);
     ensureShelf(bookId);
     const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
     if (body.status !== undefined) {
@@ -332,10 +388,10 @@ export function updateShelf(bookId, body) {
       db.prepare(`UPDATE shelf SET status = ?, updated_at = datetime('now'),
         started_on = CASE WHEN ? = 'reading' THEN COALESCE(started_on, ?) WHEN ? IN ('want') OR ? IS NULL THEN NULL ELSE started_on END,
         current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END
-        WHERE book_id = ?`).run(body.status, body.status, today(), body.status, body.status, body.status, bookId);
+        WHERE book_id = ?`).run(body.status, body.status, onDay || today(), body.status, body.status, body.status, bookId);
       // Registra o evento apenas ao entrar em `dropped`; repetir o mesmo status não duplica nem data legados.
       if (body.status === 'dropped' && prev.status !== 'dropped') {
-        db.prepare(`INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, ?, datetime('now'))`).run(bookId, explicitDroppedOn || today());
+        db.prepare(`INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, ?, datetime('now'))`).run(bookId, explicitDroppedOn || onDay || today());
       }
     }
     if (body.liked !== undefined) {
@@ -344,24 +400,32 @@ export function updateShelf(bookId, body) {
     if (explicitStartedOn !== undefined) {
       db.prepare('UPDATE shelf SET started_on = ? WHERE book_id = ?').run(explicitStartedOn, bookId);
     }
-    return presentBook(getBookRow(bookId));
+    const result = presentBook(getBookRow(bookId));
+    saveSyncOp(opId, 'shelf', bookId, result);
+    return result;
   });
 }
 
 export function addProgress(bookId, body) {
-  const book = requireBook(bookId);
+  const opId = parseOpId(body.op_id);
   const page = asInt(body.page);
   if (page === null) throw new HttpError(400, 'Página inválida.');
-  if (book.pages && page > book.pages) throw new HttpError(400, `Este livro tem ${book.pages} páginas.`);
   const day = asDate(body.on_day) || today();
   return transaction(() => {
+    const replayed = findSyncOp(opId, 'progress', bookId);
+    if (replayed) return replayed;
+    const book = requireBook(bookId);
+    if (book.pages && page > book.pages) throw new HttpError(400, `Este livro tem ${book.pages} páginas.`);
+    checkShelfConflict(book, body.expected);
     ensureShelf(bookId);
     const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
     preserveLegacyDrop(bookId, prev?.status);
     db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), updated_at = datetime('now') WHERE book_id = ?`)
       .run(page, day, bookId);
     db.prepare('INSERT INTO progress (book_id, page, on_day) VALUES (?, ?, ?)').run(bookId, page, day);
-    return presentBook(getBookRow(bookId));
+    const result = presentBook(getBookRow(bookId));
+    saveSyncOp(opId, 'progress', bookId, result);
+    return result;
   });
 }
 
@@ -457,11 +521,19 @@ export function diary({ year }) {
 // ---- Trechos ----
 
 export function addQuote(bookId, body) {
-  requireBook(bookId);
+  const opId = parseOpId(body.op_id);
   const text = clampText(body.text, 5000);
   if (!text) throw new HttpError(400, 'Escreva o trecho.');
-  const { lastInsertRowid } = db.prepare('INSERT INTO quotes (book_id, text, page) VALUES (?, ?, ?)').run(bookId, text, asInt(body.page));
-  return db.prepare('SELECT * FROM quotes WHERE id = ?').get(lastInsertRowid);
+  const page = asInt(body.page);
+  return transaction(() => {
+    const replayed = findSyncOp(opId, 'quote', bookId);
+    if (replayed) return replayed;
+    requireBook(bookId);
+    const { lastInsertRowid } = db.prepare('INSERT INTO quotes (book_id, text, page) VALUES (?, ?, ?)').run(bookId, text, page);
+    const result = db.prepare('SELECT * FROM quotes WHERE id = ?').get(lastInsertRowid);
+    saveSyncOp(opId, 'quote', bookId, result);
+    return result;
+  });
 }
 
 export function deleteQuote(id) {

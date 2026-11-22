@@ -1,5 +1,5 @@
 import { html, useEffect, useRef, useState } from '/vendor/htm-preact.js';
-import { act, api, authorLine, navigate, STATUS, useFetch } from '../lib.js';
+import { act, api, authorLine, navigate, queueShelfStatus, STATUS, toast, useFetch } from '../lib.js';
 import { Cover, ErrorBox, Icon, Sheet, Stars } from '../ui.js';
 import { GenrePicker } from '../sheets.js';
 
@@ -44,10 +44,19 @@ function ManualSheet({ initialTitle, onClose }) {
 
 function Result({ book }) {
   const [saved, setSaved] = useState(book.status);
+  const [saving, setSaving] = useState(false);
   const href = `/livro/${encodeURIComponent(book.id)}`;
   const want = async () => {
-    const ok = await act(() => api(`/books/${encodeURIComponent(book.id)}/shelf`, { method: 'PUT', body: { status: 'want' } }), 'Guardado em Quero ler.');
-    if (ok) setSaved('want');
+    if (saving) return;
+    setSaving(true);
+    const res = await queueShelfStatus(book, 'want');
+    setSaving(false);
+    if (res.status === 'synced' || res.status === 'queued') {
+      setSaved('want');
+      toast(res.status === 'synced' ? 'Guardado em Quero ler.' : 'Salvo na fila de sincronização.');
+    } else {
+      toast(res.error?.message || 'Não foi possível guardar em Quero ler.', 'err');
+    }
   };
   return html`<div class="result">
     <a href=${href} aria-hidden="true" tabindex="-1"><${Cover} book=${book} /></a>
@@ -57,7 +66,7 @@ function Result({ book }) {
       ${book.original_title && html`<div class="result-orig">${book.original_title}</div>`}
       ${saved && html`<div class="status-tag"><${Icon.check} /> ${STATUS[saved]}${book.rating ? html` · <${Stars} value=${book.rating} size=${11} />` : ''}</div>`}
     </a>
-    ${!saved && html`<button class="icon-btn" onClick=${want} aria-label=${`Quero ler ${book.title}`} title="Quero ler"><${Icon.bookmark} /></button>`}
+    ${!saved && html`<button class="icon-btn" disabled=${saving} onClick=${want} aria-label=${`Quero ler ${book.title}`} title="Quero ler"><${Icon.bookmark} /></button>`}
   </div>`;
 }
 

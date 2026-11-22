@@ -122,6 +122,14 @@ CREATE TABLE IF NOT EXISTS api_cache (
   value TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sync_ops (
+  op_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 // Se `drops` foi criada com `dropped_on` ou `created_at` NOT NULL, recria permitindo NULL

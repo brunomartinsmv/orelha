@@ -1,6 +1,22 @@
 // Folhas de ação compartilhadas: registrar leitura, página atual, trecho, lista, seletor de livro.
 import { html, useEffect, useState } from '/vendor/htm-preact.js';
-import { act, api, authorLine, localDate, plural, toast, useFetch } from './lib.js';
+import {
+  act,
+  api,
+  authorLine,
+  discardSyncItem,
+  localDate,
+  num,
+  plural,
+  queueProgress,
+  queueQuote,
+  retrySyncItem,
+  STATUS,
+  syncNow,
+  toast,
+  useFetch,
+  useSyncState,
+} from './lib.js';
 import { Cover, Icon, Sheet, StarInput, Toggle } from './ui.js';
 
 const FORMATS = [['paper', 'Papel'], ['ebook', 'E-book'], ['audio', 'Áudio']];
@@ -100,12 +116,29 @@ export function ProgressSheet({ book, onClose, onFinish }) {
 
   const save = async (e) => {
     e.preventDefault();
-    if (page === '') return;
-    if (book.pages && Number(page) >= book.pages) { onClose(); onFinish?.(); return; }
+    if (page === '' || saving) return;
+    const numPage = Number(page);
+    if (!Number.isInteger(numPage) || numPage < 0) {
+      toast('Página inválida.', 'err');
+      return;
+    }
+    if (book.pages && numPage >= book.pages) {
+      if (onFinish) { onClose(); onFinish(); return; }
+      if (numPage > book.pages) { toast(`Este livro tem ${book.pages} páginas.`, 'err'); return; }
+    }
     setSaving(true);
-    const ok = await act(() => api(`/books/${encodeURIComponent(book.id)}/progress`, { method: 'POST', body: { page: Number(page), on_day: localDate() } }), 'Página atualizada.');
+    const res = await queueProgress(book, { page: numPage, on_day: localDate() });
     setSaving(false);
-    if (ok) onClose();
+    if (res.status === 'synced') {
+      toast('Página atualizada.');
+      onClose();
+    } else if (res.status === 'queued') {
+      toast('Página salva na fila de sincronização.');
+      onClose();
+    } else {
+      toast(res.error?.message || 'Não foi possível atualizar a página.', 'err');
+      if (res.status === 'conflict') onClose();
+    }
   };
 
   return html`<${Sheet} title="Em que página você está?" onClose=${onClose}>
@@ -167,10 +200,22 @@ export function GoalLine({ goal, statsLink = false }) {
 export function QuoteSheet({ book, onClose }) {
   const [text, setText] = useState('');
   const [page, setPage] = useState(book.current_page ?? '');
+  const [saving, setSaving] = useState(false);
   const save = async (e) => {
     e.preventDefault();
-    const ok = await act(() => api(`/books/${encodeURIComponent(book.id)}/quotes`, { method: 'POST', body: { text, page: page === '' ? null : Number(page) } }), 'Trecho guardado.');
-    if (ok) onClose();
+    if (!text.trim() || saving) return;
+    setSaving(true);
+    const res = await queueQuote(book, { text, page: page === '' ? null : Number(page) });
+    setSaving(false);
+    if (res.status === 'synced') {
+      toast('Trecho guardado.');
+      onClose();
+    } else if (res.status === 'queued') {
+      toast('Trecho salvo na fila de sincronização.');
+      onClose();
+    } else {
+      toast(res.error?.message || 'Não foi possível guardar o trecho.', 'err');
+    }
   };
   return html`<${Sheet} title="Guardar um trecho" onClose=${onClose}>
     <form onSubmit=${save}>
@@ -180,8 +225,73 @@ export function QuoteSheet({ book, onClose }) {
       <label class="field"><span>Página (opcional)</span>
         <input class="input" type="number" inputmode="numeric" min="0" value=${page} onInput=${(e) => setPage(e.target.value)} />
       </label>
-      <button class="btn primary block" style="margin-top:16px" disabled=${!text.trim()}>Guardar</button>
+      <button class="btn primary block" style="margin-top:16px" disabled=${saving || !text.trim()}>${saving ? 'Guardando…' : 'Guardar'}</button>
     </form>
+  <//>`;
+}
+
+function describeOp(item) {
+  if (item.kind === 'progress') return `Página ${num(item.payload.page)}`;
+  if (item.kind === 'quote') {
+    const clean = String(item.payload.text || '').trim();
+    const preview = clean.length > 80 ? `${clean.slice(0, 77)}…` : clean;
+    const prefix = item.payload.page != null ? `Trecho (p. ${num(item.payload.page)}): ` : 'Trecho: ';
+    return `${prefix}“${preview}”`;
+  }
+  return item.payload.status
+    ? `Status: ${STATUS[item.payload.status] || item.payload.status}`
+    : 'Remover status da estante';
+}
+
+function describeServerState(current) {
+  if (!current) return 'Alterado em outro aparelho';
+  const parts = [current.status ? (STATUS[current.status] || current.status) : 'Sem status na estante'];
+  if (current.current_page != null) parts.push(`pág. ${num(current.current_page)}`);
+  return parts.join(' · ');
+}
+
+function stateBadge(item, isHead, syncing) {
+  if (item.state === 'conflict') return 'Conflito';
+  if (item.state === 'error') return 'Falhou';
+  if (syncing && isHead) return 'Sincronizando…';
+  return 'Aguardando';
+}
+
+export function SyncSheet({ onClose }) {
+  const { items, syncing, blockedItem } = useSyncState();
+
+  return html`<${Sheet} title="Fila de sincronização" onClose=${onClose}>
+    ${items.length === 0
+      ? html`<p class="muted" style="padding:12px 0">Nenhuma alteração aguardando sincronização.</p>`
+      : html`
+        <div class="sync-summary">
+          <p class="muted" style="font-size:14px">${plural(items.length, 'alteração pendente', 'alterações pendentes')}. Elas são enviadas em ordem assim que o servidor responder.</p>
+          ${!blockedItem && html`<button type="button" class="btn small primary" disabled=${syncing} onClick=${() => syncNow()}>
+            ${syncing ? 'Sincronizando…' : 'Sincronizar agora'}
+          </button>`}
+        </div>
+        <div class="sync-list">
+          ${items.map((item, idx) => html`<article key=${item.seq} class=${`sync-item ${item.state}`}>
+            <div class="sync-item-head">
+              <strong class="sync-item-title">${item.book_title}</strong>
+              <span class=${`sync-badge ${item.state}`}>${stateBadge(item, idx === 0, syncing)}</span>
+            </div>
+            <p class="sync-item-meta">${describeOp(item)}</p>
+            ${item.state === 'conflict' && html`<div class="sync-item-error">
+              <p>${item.error?.message || 'Este livro foi alterado em outro aparelho antes da sincronização.'}</p>
+              <p class="muted" style="margin-top:4px">No servidor agora: ${describeServerState(item.error?.current)}</p>
+            </div>`}
+            ${item.state === 'error' && html`<div class="sync-item-error">
+              <p>${item.error?.message || 'Não foi possível concluir a alteração.'}</p>
+            </div>`}
+            <div class="sync-item-actions">
+              ${item.state === 'conflict' && html`<button type="button" class="btn small primary" disabled=${syncing} onClick=${() => retrySyncItem(item.seq, { force: true })}>Aplicar mesmo assim</button>`}
+              ${item.state === 'error' && html`<button type="button" class="btn small primary" disabled=${syncing} onClick=${() => retrySyncItem(item.seq)}>Tentar de novo</button>`}
+              <button type="button" class="btn small danger" disabled=${syncing && idx === 0 && item.state === 'pending'} onClick=${() => discardSyncItem(item.seq)}>Descartar</button>
+            </div>
+          </article>`)}
+        </div>
+      `}
   <//>`;
 }
 

@@ -1,6 +1,6 @@
 # <img src="public/icons/icon.svg" width="32" height="32" alt="" align="top"> Orelha
 
-Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no seu computador (com zero dependências externas e sem etapa de build) e pode ser acessado com segurança pelos seus aparelhos na sua rede privada [Tailscale](https://tailscale.com), inclusive em modo offline somente leitura quando o computador está dormindo.
+Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no seu computador (com zero dependências externas e sem etapa de build) e pode ser acessado com segurança pelos seus aparelhos na sua rede privada [Tailscale](https://tailscale.com), com consulta em cache e fila offline no PWA para ações essenciais quando o computador está dormindo.
 
 ![Estante de lombadas do Orelha](docs/estante.png)
 
@@ -23,7 +23,7 @@ Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no 
 - **Números da leitura:** estatísticas por ano ou de todo o histórico, distribuição de notas, autores mais lidos, décadas de publicação, extremos de tamanho e **A pilha** (altura física equivalente em papel).
 - **Descoberta e epígrafes:** recomendações em português baseadas no seu perfil de leitura via [Open Library](https://openlibrary.org) (com fallback na [BrasilAPI](https://brasilapi.com.br) para ISBNs brasileiros) e citações diárias vindas do [Wikiquote em português](https://pt.wikiquote.org).
 - **Portabilidade total:** importação idempotente de históricos em CSV do **Skoob**, **Goodreads**, **StoryGraph** e do próprio Orelha (com busca gradual de capas em segundo plano), exportação completa em CSV ou JSON e restauração de backups JSON pela interface.
-- **PWA e modo offline:** instalável na Tela de Início do iOS/Android, com tema claro/escuro automático ou manual e cache via Service Worker para consulta mesmo com o servidor desligado.
+- **PWA e modo offline:** instalável na Tela de Início do iOS/Android, com tema claro/escuro automático ou manual, cache via Service Worker e fila local em IndexedDB para atualizar página, guardar trechos e mudar o status da estante mesmo com o servidor desligado.
 
 ---
 
@@ -133,7 +133,7 @@ Para lançar uma versão:
 
 - **Validação de origem e dispositivo:** requisições vindas do `tailscale serve` recebem o IP real do cliente no final de `X-Forwarded-For`; aparelhos fora de `allowedDevices`, `Host` desconhecidos (proteção contra *DNS rebinding*) ou escritas de outras origens recebem `403 Forbidden`.
 - **Backups:** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Para ter uma cópia fora do computador, configure um remoto no [rclone](https://rclone.org) (ex.: Google Drive com `scope = drive.file`) e ponha `"backupRemoto": "gdrive:Orelha/backups"` no `config.json`: cada backup diário espelha a pasta lá.
-- **Leitura com o servidor dormindo:** o Service Worker mantém a interface e a última cópia das respostas da API e capas em cache. Se o computador estiver em repouso, o app abre normalmente no celular em modo somente leitura.
+- **Uso offline com o servidor dormindo:** o Service Worker mantém a interface, capas e a última cópia dos dados em cache; atualizações de página, trechos e status da estante ficam em uma fila local no IndexedDB com atualização otimista na tela e sincronizam em ordem quando o servidor voltar a responder.
 
 ---
 
