@@ -726,14 +726,18 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   assert.notEqual(restoredReread.started_on, '2021-01-05');
   assert.equal((await call('GET', `/books/${restoredReread.id}`)).json.logs[0].started_on, '2021-01-05');
 
-  // 6) import_key de outra edição no JSON não omite a leitura da edição restaurada.
+  // 6) import_key colidindo entre duas edições (mesma Date Read, ISBNs diferentes):
+  //    a) no JSON, o log da edição restaurada é preservado;
+  //    b) no CSV, a segunda edição recebe chave estável escopada e preserva edições locais.
   db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
-  const ed1Csv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000701,read,4,Resenha Ed1\n`;
-  const ed2Csv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000702,read,5,Resenha Ed2\n`;
+  const ed1Csv = `Title,Author,ISBN13,Date Read,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000701,2025/05/10,read,4,Resenha Ed1\n`;
+  const ed2Csv = `Title,Author,ISBN13,Date Read,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000702,2025/05/10,read,5,Resenha Ed2\n`;
   await call('POST', '/import', ed1Csv);
   const ed1Backup = (await call('GET', '/export.json')).json;
   db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
   await call('POST', '/import', ed2Csv);
+  const ed2Key = db.prepare('SELECT import_key FROM logs LIMIT 1').get().import_key;
+  assert.equal(ed1Backup.logs[0].import_key, ed2Key, 'as duas edições devem gerar a mesma import_key');
   const mergedEd = (await call('POST', '/import', JSON.stringify(ed1Backup))).json;
   assert.equal(mergedEd.books_added, 1);
   assert.equal(mergedEd.logs_added, 1);
@@ -741,14 +745,49 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   assert.equal(restoredEd1.logs.length, 1);
   assert.equal(restoredEd1.logs[0].review, 'Resenha Ed1');
 
-  // 7) Dois CSVs com leituras sem data distintas (resenhas/releitura diferentes) mantêm ambas.
+  // Colisão direta por CSV entre duas edições + edição local na 2ª edição não duplica ao reimportar.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', ed1Csv);
+  await call('POST', '/import', ed2Csv);
+  const ed2Book = db.prepare('SELECT id FROM books WHERE isbn = ?').get('9788500000702');
+  const ed2Log = db.prepare('SELECT id, import_key FROM logs WHERE book_id = ?').get(ed2Book.id);
+  assert.ok(ed2Log.import_key, 'segunda edição recebe chave estável escopada');
+  await call('PATCH', `/logs/${ed2Log.id}`, { rating: 6, finished_on: '2025-05-10', review: 'Editada' });
+  assert.equal((await call('POST', '/import', ed2Csv)).json.logs_added, 0);
+  assert.equal((await call('GET', `/books/${ed2Book.id}`)).json.logs[0].review, 'Editada');
+
+  // 7) Dois CSVs com leituras sem data distintas (resenhas/releitura diferentes) mantêm ambas,
+  //    e um registro legado com import_key antiga e resenha editada não duplica ao reimportar.
   const csvA = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,4,,Primeira\n`;
   const csvB = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,5,sim,Segunda\n`;
   assert.equal((await call('POST', '/import', csvA)).json.logs_added, 1);
   assert.equal((await call('POST', '/import', csvB)).json.logs_added, 1);
   assert.equal((await call('POST', '/import', csvB)).json.logs_added, 0);
 
-  // 8) Marcas Unicode não latinas (パン vs バン) distinguem livros, mas NFC e NFD equivalem.
+  const { createHash } = await import('node:crypto');
+  const legacyBook = await newBook('Legado Sem Data', { authors: 'Autora Z', isbn: '9788500000704' });
+  const legacyKey = createHash('sha1').update('legado sem data|autora z|').digest('hex');
+  db.prepare(`INSERT INTO logs (book_id, rating, review, import_key) VALUES (?, 8, 'Editada no Orelha', ?)`).run(legacyBook.id, legacyKey);
+  await call('PUT', `/books/${legacyBook.id}/shelf`, { status: 'read' });
+  const legacyCsv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nLegado Sem Data,Autora Z,9788500000704,read,4,Resenha original\n`;
+  assert.equal((await call('POST', '/import', legacyCsv)).json.logs_added, 0);
+  assert.equal((await call('GET', `/books/${legacyBook.id}`)).json.logs[0].review, 'Editada no Orelha');
+
+  // 8) Log histórico sem data/nota/resenha (só releitura/formato) sobrevive no CSV do Orelha sem vazar started_on.
+  const histOnly = await newBook('Histórico Sem Nota', { isbn: '9788500000705' });
+  await call('POST', `/books/${histOnly.id}/logs`, { started_on: '2020-01-01', reread: true, format: 'paper' });
+  await call('PUT', `/books/${histOnly.id}/shelf`, { status: 'reading', started_on: '2026-11-21' });
+  const histCsv = (await call('GET', '/export.csv')).text;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', histCsv);
+  const [restoredHistOnly] = (await call('GET', '/shelf?status=reading&q=Histórico Sem Nota')).json;
+  assert.notEqual(restoredHistOnly.started_on, '2020-01-01');
+  const histPage = (await call('GET', `/books/${restoredHistOnly.id}`)).json;
+  assert.equal(histPage.logs.length, 1);
+  assert.equal(histPage.logs[0].started_on, '2020-01-01');
+  assert.equal(histPage.logs[0].format, 'paper');
+
+  // 9) Marcas Unicode não latinas (パン vs バン) distinguem livros, e formas mistas NFC/NFD equivalem.
   db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
   const pan = await newBook('パン', { authors: '佐藤' });
   await call('POST', `/books/${pan.id}/logs`, { rating: 8, review: 'Sobre pão' });
@@ -760,7 +799,11 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   assert.equal(panMerged.books_added, 1);
   assert.equal((await call('GET', `/books/${ban.id}`)).json.logs.length, 1);
   assert.equal((await call('GET', `/books/${pan.id}`)).json.logs[0].review, 'Sobre pão');
-  // NFC e NFD do mesmo título japonês não duplicam no CSV.
   const nfdCsv = `Title,Author,Bookshelves,Date Read\n${'パン'.normalize('NFD')},佐藤,read,2025-05-01\n`;
   assert.equal((await call('POST', '/import', nfdCsv)).json.books_added, 0);
+  const mixedCsv = `Title,Author,Bookshelves,Date Read\nCaf\u00e9 com cha\u0301,Autora Mista,read,2025-06-01\n`;
+  assert.equal((await call('POST', '/import', mixedCsv)).json.books_added, 1);
+  const mixedAgain = (await call('POST', '/import', mixedCsv)).json;
+  assert.equal(mixedAgain.books_added, 0);
+  assert.equal(mixedAgain.logs_added, 0);
 });

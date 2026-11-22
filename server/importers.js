@@ -300,13 +300,17 @@ function findBook(item) {
   }
   if (!item.title) return null;
   const prefix = item.title.split(/[:(]/)[0].trim() || item.title.trim();
-  const candidates = db.prepare('SELECT id, title, authors, isbn FROM books WHERE title LIKE ? OR title LIKE ?')
-    .all(`${prefix.normalize('NFC')}%`, `${prefix.normalize('NFD')}%`);
   const author = norm(item.authors?.[0] || '');
-  return candidates.find((c) => {
+  const matches = (c) => {
     if (item.isbn && c.isbn && item.isbn !== c.isbn) return false;
     return sameTitle(c.title, item.title) && norm(JSON.parse(c.authors || '[]')[0] || '') === author;
-  })?.id ?? null;
+  };
+  const candidates = db.prepare('SELECT id, title, authors, isbn FROM books WHERE title LIKE ? OR title LIKE ? OR title LIKE ?')
+    .all(`${prefix}%`, `${prefix.normalize('NFC')}%`, `${prefix.normalize('NFD')}%`);
+  const fast = candidates.find(matches);
+  if (fast) return fast.id;
+  // Fallback para combinações mistas de NFC/NFD ou maiúsculas não-ASCII que o LIKE do SQLite não equipara.
+  return db.prepare('SELECT id, title, authors, isbn FROM books').all().find(matches)?.id ?? null;
 }
 
 function sameLogContent(existing, incoming) {
@@ -344,7 +348,10 @@ export function importCsv(text) {
       const review = item.review ? item.review.trim().slice(0, 20_000) : null;
       const finishedOn = item.finished_on;
       const startedOn = item.started_on && (!finishedOn || item.started_on <= finishedOn) ? item.started_on : null;
-      const hasLog = item.status === 'read' || finishedOn || item.rating || review;
+      const hasLog = Boolean(
+        item.status === 'read' || finishedOn || item.rating || review
+        || (name === 'Orelha (CSV)' && (item.reread || item.format)),
+      );
       const effectiveStatus = item.status || (hasLog ? 'read' : null);
 
       let bookId = findBook({ title, authors, isbn: item.isbn });
@@ -385,18 +392,20 @@ export function importCsv(text) {
         const occ = (keyOccurrences.get(baseKey) || 0) + 1;
         keyOccurrences.set(baseKey, occ);
         const importKey = occ === 1 ? baseKey : createHash('sha1').update(`${baseKey}#${occ}`).digest('hex');
+        // Chave estável por edição: usada quando outra edição já ocupa importKey na tabela logs.
+        const scopedKey = createHash('sha1').update(`${bookId}|${importKey}`).digest('hex');
 
         const candidates = preexistingLogsByBook.get(bookId) || [];
-        const match = candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === importKey)
+        const match = candidates.find((c) => !usedLogIds.has(c.id) && (c.import_key === importKey || c.import_key === scopedKey))
           || (occ === 1 && !finishedOn
-            ? candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === legacyKey
-              && Boolean(c.reread) === Boolean(incoming.reread) && (c.review ?? null) === incoming.review)
+            ? candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === legacyKey)
             : null)
           || candidates.find((c) => !usedLogIds.has(c.id) && sameLogContent(c, incoming));
         if (match) {
           usedLogIds.add(match.id);
         } else {
-          const safeKey = db.prepare('SELECT 1 FROM logs WHERE import_key = ?').get(importKey) ? null : importKey;
+          const keyTaken = (k) => !!db.prepare('SELECT 1 FROM logs WHERE import_key = ?').get(k);
+          const safeKey = !keyTaken(importKey) ? importKey : !keyTaken(scopedKey) ? scopedKey : null;
           db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format, import_key)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .run(bookId, incoming.finished_on, incoming.started_on, incoming.rating, incoming.review, item.spoilers ? 1 : 0, incoming.reread, incoming.format, safeKey);
