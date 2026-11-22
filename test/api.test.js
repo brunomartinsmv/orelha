@@ -745,10 +745,13 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   assert.equal(restoredEd1.logs.length, 1);
   assert.equal(restoredEd1.logs[0].review, 'Resenha Ed1');
 
-  // Colisão direta por CSV entre duas edições + edição local na 2ª edição não duplica ao reimportar.
+  // Colisão no mesmo CSV com duas edições + edição local na 2ª edição + reimportar só a 2ª edição não duplica.
   db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
-  await call('POST', '/import', ed1Csv);
-  await call('POST', '/import', ed2Csv);
+  const bothEdCsv = `Title,Author,ISBN13,Date Read,Bookshelves,My Rating,My Review
+Mesmo Título,Autora X,9788500000701,2025/05/10,read,4,Resenha Ed1
+Mesmo Título,Autora X,9788500000702,2025/05/10,read,5,Resenha Ed2
+`;
+  await call('POST', '/import', bothEdCsv);
   const ed2Book = db.prepare('SELECT id FROM books WHERE isbn = ?').get('9788500000702');
   const ed2Log = db.prepare('SELECT id, import_key FROM logs WHERE book_id = ?').get(ed2Book.id);
   assert.ok(ed2Log.import_key, 'segunda edição recebe chave estável escopada');
@@ -757,7 +760,7 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   assert.equal((await call('GET', `/books/${ed2Book.id}`)).json.logs[0].review, 'Editada');
 
   // 7) Dois CSVs com leituras sem data distintas (resenhas/releitura diferentes) mantêm ambas,
-  //    e um registro legado com import_key antiga e resenha editada não duplica ao reimportar.
+  //    registro legado com resenha editada não duplica, mas uma releitura sem data no mesmo livro é importada.
   const csvA = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,4,,Primeira\n`;
   const csvB = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,5,sim,Segunda\n`;
   assert.equal((await call('POST', '/import', csvA)).json.logs_added, 1);
@@ -772,6 +775,10 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   const legacyCsv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nLegado Sem Data,Autora Z,9788500000704,read,4,Resenha original\n`;
   assert.equal((await call('POST', '/import', legacyCsv)).json.logs_added, 0);
   assert.equal((await call('GET', `/books/${legacyBook.id}`)).json.logs[0].review, 'Editada no Orelha');
+  // Releitura sem data no livro com registro legado não é engolida pela chave legada.
+  const legacyRereadCsv = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nLegado Sem Data,Autora Z,9788500000704,read,5,sim,Releitura nova\n`;
+  assert.equal((await call('POST', '/import', legacyRereadCsv)).json.logs_added, 1);
+  assert.equal((await call('GET', `/books/${legacyBook.id}`)).json.logs.length, 2);
 
   // 8) Log histórico sem data/nota/resenha (só releitura/formato) sobrevive no CSV do Orelha sem vazar started_on.
   const histOnly = await newBook('Histórico Sem Nota', { isbn: '9788500000705' });
@@ -787,7 +794,7 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   assert.equal(histPage.logs[0].started_on, '2020-01-01');
   assert.equal(histPage.logs[0].format, 'paper');
 
-  // 9) Marcas Unicode não latinas (パン vs バン) distinguem livros, e formas mistas NFC/NFD equivalem.
+  // 9) Marcas/acentos distinguem livros (パン vs バン, Vovó vs Vovô), enquanto NFC/NFD/misto equivalem.
   db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
   const pan = await newBook('パン', { authors: '佐藤' });
   await call('POST', `/books/${pan.id}/logs`, { rating: 8, review: 'Sobre pão' });
@@ -802,8 +809,28 @@ test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos
   const nfdCsv = `Title,Author,Bookshelves,Date Read\n${'パン'.normalize('NFD')},佐藤,read,2025-05-01\n`;
   assert.equal((await call('POST', '/import', nfdCsv)).json.books_added, 0);
   const mixedCsv = `Title,Author,Bookshelves,Date Read\nCaf\u00e9 com cha\u0301,Autora Mista,read,2025-06-01\n`;
+  const nfcCsv = `Title,Author,Bookshelves,Date Read\nCaf\u00e9 com ch\u00e1,Autora Mista,read,2025-06-01\n`;
   assert.equal((await call('POST', '/import', mixedCsv)).json.books_added, 1);
-  const mixedAgain = (await call('POST', '/import', mixedCsv)).json;
-  assert.equal(mixedAgain.books_added, 0);
-  assert.equal(mixedAgain.logs_added, 0);
+  assert.equal((await call('POST', '/import', nfcCsv)).json.books_added, 0);
+  const accentsCsv = `Title,Author,Bookshelves,My Review\nVovó,Autora Acento,read,Resenha Vovó\nVovô,Autora Acento,read,Resenha Vovô\n`;
+  assert.equal((await call('POST', '/import', accentsCsv)).json.books_added, 2);
+
+  // 10) Restauração parcial com duas listas homônimas idênticas preserva a sobrevivente sem misturar itens.
+  db.exec('DELETE FROM list_items; DELETE FROM lists;');
+  const itemA = await newBook('Item Lista A');
+  const itemB = await newBook('Item Lista B');
+  const la = (await call('POST', '/lists', { title: 'Iguais', description: 'Mesma', ranked: false })).json;
+  const lb = (await call('POST', '/lists', { title: 'Iguais', description: 'Mesma', ranked: false })).json;
+  db.prepare(`UPDATE lists SET created_at = '2025-01-01 12:00:00' WHERE id IN (?, ?)`).run(la.id, lb.id);
+  await call('POST', `/lists/${la.id}/items`, { book_id: itemA.id });
+  await call('POST', `/lists/${lb.id}/items`, { book_id: itemB.id });
+  const listsBackup = (await call('GET', '/export.json')).json;
+  await call('DELETE', `/lists/${la.id}`);
+  await call('POST', '/import', JSON.stringify(listsBackup));
+  const surviving = (await call('GET', `/lists/${lb.id}`)).json;
+  assert.deepEqual(surviving.books.map((b) => b.id), [itemB.id]);
+  const allSame = (await call('GET', '/lists')).json.filter((l) => l.title === 'Iguais');
+  assert.equal(allSame.length, 2);
+  const recreated = (await call('GET', `/lists/${allSame.find((l) => l.id !== lb.id).id}`)).json;
+  assert.deepEqual(recreated.books.map((b) => b.id), [itemA.id]);
 });

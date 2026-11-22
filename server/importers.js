@@ -46,11 +46,18 @@ export function parseCsv(text) {
     .map((r) => Object.fromEntries(header.map((h, i) => [h.trim(), r[i] ?? ''])));
 }
 
-// Remove apenas diacríticos combinantes sobre letras latinas e recompõe em NFC:
-// preserva distinções de outros alfabetos (ex.: パン vs バン, Й vs И) mantendo equivalência NFC/NFD.
+// Remove apenas diacríticos combinantes sobre letras latinas (para cabeçalhos, status e formatos).
 const norm = (s) => String(s || '')
   .normalize('NFD')
   .replace(/(\p{Script=Latin})[\u0300-\u036f]+/gu, '$1')
+  .normalize('NFC')
+  .toLowerCase()
+  .replace(/[^\p{L}\p{N}\p{M}]+/gu, ' ')
+  .trim();
+
+// Chave de identidade para títulos/autores: unifica NFC/NFD/misto preservando acentos e marcas
+// que distinguem palavras (ex.: Vovó vs Vovô, パン vs バン).
+const titleKey = (s) => String(s || '')
   .normalize('NFC')
   .toLowerCase()
   .replace(/[^\p{L}\p{N}\p{M}]+/gu, ' ')
@@ -283,34 +290,43 @@ function detectFormat(rows) {
 // Evita fundir volumes distintos como "Coleção: Volume I" e "Coleção: Volume II",
 // mas casa "Duna" com "Duna: Livro 1" quando apenas um dos dois tem subtítulo.
 function sameTitle(a, b) {
-  const na = norm(a);
-  const nb = norm(b);
+  const na = titleKey(a);
+  const nb = titleKey(b);
   if (!na || !nb) return false;
   if (na === nb) return true;
-  const pa = norm(String(a).split(/[:(]/)[0]);
-  const pb = norm(String(b).split(/[:(]/)[0]);
+  const pa = titleKey(String(a).split(/[:(]/)[0]);
+  const pb = titleKey(String(b).split(/[:(]/)[0]);
   if (!pa || pa !== pb) return false;
   return na === pa || nb === pb;
 }
 
-function findBook(item) {
-  if (item.isbn) {
-    const byIsbn = db.prepare('SELECT id FROM books WHERE isbn = ?').get(item.isbn);
-    if (byIsbn) return byIsbn.id;
-  }
-  if (!item.title) return null;
-  const prefix = item.title.split(/[:(]/)[0].trim() || item.title.trim();
-  const author = norm(item.authors?.[0] || '');
-  const matches = (c) => {
-    if (item.isbn && c.isbn && item.isbn !== c.isbn) return false;
-    return sameTitle(c.title, item.title) && norm(JSON.parse(c.authors || '[]')[0] || '') === author;
+const titlePrefixKey = (title) => titleKey(String(title || '').split(/[:(]/)[0]) || titleKey(title);
+
+function createBookIndex() {
+  const byIsbn = new Map();
+  const byPrefix = new Map();
+  const add = (row) => {
+    if (row.isbn && !byIsbn.has(row.isbn)) byIsbn.set(row.isbn, row);
+    const key = titlePrefixKey(row.title);
+    if (!key) return;
+    const list = byPrefix.get(key) || [];
+    list.push(row);
+    byPrefix.set(key, list);
   };
-  const candidates = db.prepare('SELECT id, title, authors, isbn FROM books WHERE title LIKE ? OR title LIKE ? OR title LIKE ?')
-    .all(`${prefix}%`, `${prefix.normalize('NFC')}%`, `${prefix.normalize('NFD')}%`);
-  const fast = candidates.find(matches);
-  if (fast) return fast.id;
-  // Fallback para combinações mistas de NFC/NFD ou maiúsculas não-ASCII que o LIKE do SQLite não equipara.
-  return db.prepare('SELECT id, title, authors, isbn FROM books').all().find(matches)?.id ?? null;
+  for (const row of db.prepare('SELECT id, title, authors, isbn FROM books').all()) add(row);
+  const find = (item) => {
+    if (item.isbn && byIsbn.has(item.isbn)) return byIsbn.get(item.isbn).id;
+    const key = titlePrefixKey(item.title);
+    if (!key) return null;
+    const author = titleKey(item.authors?.[0] || '');
+    const candidates = byPrefix.get(key) || [];
+    return candidates.find((c) => {
+      if (item.isbn && c.isbn && item.isbn !== c.isbn) return false;
+      const firstAuthor = titleKey((Array.isArray(c.authors) ? c.authors : JSON.parse(c.authors || '[]'))[0] || '');
+      return sameTitle(c.title, item.title) && firstAuthor === author;
+    })?.id ?? null;
+  };
+  return { add, find };
 }
 
 function sameLogContent(existing, incoming) {
@@ -329,6 +345,7 @@ export function importCsv(text) {
   const result = { format: name, total: rows.length, books_added: 0, logs_added: 0, skipped: 0 };
 
   transaction(() => {
+    const bookIndex = createBookIndex();
     // Snapshot dos logs anteriores à importação para fazer matching por import_key ou multiplicidade
     // (preserva edições locais em registros importados, releituras sem data e logs manuais).
     const preexistingLogsByBook = new Map();
@@ -354,11 +371,12 @@ export function importCsv(text) {
       );
       const effectiveStatus = item.status || (hasLog ? 'read' : null);
 
-      let bookId = findBook({ title, authors, isbn: item.isbn });
+      let bookId = bookIndex.find({ title, authors, isbn: item.isbn });
       if (!bookId) {
         bookId = `b_${randomUUID().slice(0, 12)}`;
         db.prepare(`INSERT INTO books (id, title, authors, year, pages, isbn, cover_isbn, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'import')`)
           .run(bookId, title, JSON.stringify(authors), item.year, item.pages, item.isbn, item.isbn);
+        bookIndex.add({ id: bookId, title, authors, isbn: item.isbn });
         result.books_added++;
       }
       db.prepare('INSERT INTO shelf (book_id) VALUES (?) ON CONFLICT(book_id) DO NOTHING').run(bookId);
@@ -389,8 +407,10 @@ export function importCsv(text) {
         const baseKey = finishedOn
           ? legacyKey
           : createHash('sha1').update(`${legacyKey}|${startedOn || ''}|${incoming.reread}|${incoming.format || ''}|${norm(review || '')}`).digest('hex');
-        const occ = (keyOccurrences.get(baseKey) || 0) + 1;
-        keyOccurrences.set(baseKey, occ);
+        // Conta ocorrências por livro para que a presença de outra edição no CSV não altere a chave.
+        const occKey = `${bookId}|${baseKey}`;
+        const occ = (keyOccurrences.get(occKey) || 0) + 1;
+        keyOccurrences.set(occKey, occ);
         const importKey = occ === 1 ? baseKey : createHash('sha1').update(`${baseKey}#${occ}`).digest('hex');
         // Chave estável por edição: usada quando outra edição já ocupa importKey na tabela logs.
         const scopedKey = createHash('sha1').update(`${bookId}|${importKey}`).digest('hex');
@@ -398,7 +418,7 @@ export function importCsv(text) {
         const candidates = preexistingLogsByBook.get(bookId) || [];
         const match = candidates.find((c) => !usedLogIds.has(c.id) && (c.import_key === importKey || c.import_key === scopedKey))
           || (occ === 1 && !finishedOn
-            ? candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === legacyKey)
+            ? candidates.find((c) => !usedLogIds.has(c.id) && c.import_key === legacyKey && Boolean(c.reread) === Boolean(incoming.reread))
             : null)
           || candidates.find((c) => !usedLogIds.has(c.id) && sameLogContent(c, incoming));
         if (match) {
@@ -536,11 +556,11 @@ export function importOrelhaJson(data) {
       if (!existing && olKey) existing = takeIfFree(preexistingBooksByOl.get(olKey), { allowReservedOl: true });
       if (!existing && isbn) existing = takeIfFree(preexistingBooksByIsbn.get(isbn));
       if (!existing) {
-        const firstAuthor = norm(authors[0] || '');
+        const firstAuthor = titleKey(authors[0] || '');
         existing = preexistingBooks.find((c) => {
           if (!takeIfFree(c)) return false;
           if (isbn && c.isbn && isbn !== c.isbn) return false;
-          return sameTitle(c.title, title) && norm(JSON.parse(c.authors || '[]')[0] || '') === firstAuthor;
+          return sameTitle(c.title, title) && titleKey(JSON.parse(c.authors || '[]')[0] || '') === firstAuthor;
         }) || null;
       }
 
@@ -706,10 +726,21 @@ export function importOrelhaJson(data) {
     const listIdMap = new Map();
     const mergedListIds = new Set();
     const rawLists = Array.isArray(data.lists) ? data.lists : [];
+    const preexistingListsById = new Map(preexistingLists.map((l) => [l.id, l]));
+    const reservedListIds = new Set();
     const titleCounts = new Map();
+    const sameListMeta = (a, b) => a.title.toLowerCase() === b.title.toLowerCase()
+      && (a.description ?? null) === (b.description ?? null)
+      && Boolean(a.ranked) === Boolean(b.ranked);
+
     for (const l of rawLists) {
       const t = l?.title ? String(l.title).trim().toLowerCase() : '';
       if (t) titleCounts.set(t, (titleCounts.get(t) || 0) + 1);
+      const srcInt = safeInt(l?.id, { min: 1 });
+      const surviving = srcInt ? preexistingListsById.get(srcInt) : null;
+      if (surviving && t && sameListMeta(surviving, { title: t, description: l.description ? String(l.description).trim().slice(0, 1000) : null, ranked: l.ranked })) {
+        reservedListIds.add(srcInt);
+      }
     }
 
     for (const l of rawLists) {
@@ -720,17 +751,26 @@ export function importOrelhaJson(data) {
       const demo = l.demo ? 1 : 0;
       const createdAt = safeTimestamp(l.created_at);
       const srcKey = listKey(l.id);
+      const srcInt = safeInt(l.id, { min: 1 });
+      const meta = { title, description: desc, ranked };
 
-      let match = preexistingLists.find((c) => !usedListIds.has(c.id)
-        && c.title.toLowerCase() === title.toLowerCase()
-        && (c.description ?? null) === desc
-        && Boolean(c.ranked) === Boolean(ranked)
-        && (!createdAt || c.created_at === createdAt));
+      const takeListIfFree = (c, allowReserved = false) => {
+        if (!c || usedListIds.has(c.id)) return null;
+        if (!allowReserved && reservedListIds.has(c.id) && c.id !== srcInt) return null;
+        return c;
+      };
+
+      let match = null;
+      if (srcInt && reservedListIds.has(srcInt)) {
+        match = takeListIfFree(preexistingListsById.get(srcInt), true);
+      }
+      if (!match) {
+        match = preexistingLists.find((c) => takeListIfFree(c)
+          && sameListMeta(c, meta)
+          && (!createdAt || c.created_at === createdAt)) || null;
+      }
       if (!match && (titleCounts.get(title.toLowerCase()) || 0) === 1) {
-        match = preexistingLists.find((c) => !usedListIds.has(c.id)
-          && c.title.toLowerCase() === title.toLowerCase()
-          && (c.description ?? null) === desc
-          && Boolean(c.ranked) === Boolean(ranked));
+        match = preexistingLists.find((c) => takeListIfFree(c) && sameListMeta(c, meta)) || null;
       }
 
       if (match) {
