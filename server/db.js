@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS shelf (
   liked INTEGER NOT NULL DEFAULT 0,
   current_page INTEGER,
   started_on TEXT,
+  dropped_on TEXT,
   demo INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -113,6 +114,13 @@ CREATE TABLE IF NOT EXISTS api_cache (
   expires_at INTEGER NOT NULL
 );
 `);
+
+// Migração leve para bancos criados antes de `dropped_on`: preserva abandonos antigos sem inventar data.
+const shelfColumns = db.prepare('PRAGMA table_info(shelf)').all().map((c) => c.name);
+if (!shelfColumns.includes('dropped_on')) {
+  db.exec('ALTER TABLE shelf ADD COLUMN dropped_on TEXT');
+}
+db.exec('CREATE INDEX IF NOT EXISTS shelf_dropped ON shelf(dropped_on)');
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);

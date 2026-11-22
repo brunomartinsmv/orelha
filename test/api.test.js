@@ -841,3 +841,148 @@ Mesmo Título,Autora X,9788500000702,2025/05/10,read,5,Resenha Ed2
   assert.deepEqual((await call('GET', `/lists/${la.id}`)).json.books.map((b) => b.id), [itemA.id]);
   assert.deepEqual((await call('GET', `/lists/${lb.id}`)).json.books.map((b) => b.id), [itemB.id]);
 });
+
+test('números agregam gêneros, formatos, páginas, releituras, favoritos do período e abandonos por ano e Sempre', async () => {
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+
+  // Livro com múltiplos gêneros (Literatura brasileira + Realismo mágico), relido em outro ano com outra nota.
+  const multi = await newBook('Sertão Mágico', {
+    authors: 'Autora A',
+    pages: 300,
+    year: 1985,
+    subjects: ['Brazilian fiction', 'Magical realism', 'Assunto solto'],
+  });
+  // Livro de ficção científica sem formato definido em 2022, e outro com formato áudio em 2023.
+  const scifi = await newBook('Planeta Sem Formato', {
+    authors: 'Autor B',
+    pages: 200,
+    year: 1995,
+    subjects: ['Science fiction'],
+  });
+  // Livro sem assuntos nem formato nem páginas, lido em 2022 sem nota e relido em 2023 com nota 10.
+  const bare = await newBook('Sem Metadados', { authors: 'Autora C', pages: null, subjects: [] });
+
+  await call('POST', `/books/${multi.id}/logs`, { rating: 6, finished_on: '2022-02-10', format: 'paper' });
+  await call('POST', `/books/${scifi.id}/logs`, { rating: 9, finished_on: '2022-02-20', format: null });
+  await call('POST', `/books/${bare.id}/logs`, { rating: null, finished_on: '2022-05-01', format: null });
+
+  await call('POST', `/books/${multi.id}/logs`, { rating: 10, finished_on: '2023-08-15', format: 'ebook', reread: true });
+  await call('POST', `/books/${bare.id}/logs`, { rating: 10, finished_on: '2023-09-01', format: 'audio', reread: true });
+
+  // Abandono datado em 2023, abandono em ano sem conclusões (2021) e abandono antigo sem data (legado).
+  const drop2023 = await newBook('Abandonado 2023');
+  const drop2021 = await newBook('Só Abandono 2021');
+  const legacyDrop = await newBook('Abandono Antigo');
+
+  const d23 = await call('PUT', `/books/${drop2023.id}/shelf`, { status: 'dropped', dropped_on: '2023-04-12' });
+  assert.equal(d23.json.dropped_on, '2023-04-12');
+  // Salvar o mesmo status ou curtir não muda nem duplica a data de abandono.
+  await call('PUT', `/books/${drop2023.id}/shelf`, { status: 'dropped' });
+  await call('PUT', `/books/${drop2023.id}/shelf`, { liked: true });
+  assert.equal((await call('GET', `/books/${drop2023.id}`)).json.book.dropped_on, '2023-04-12');
+
+  await call('PUT', `/books/${drop2021.id}/shelf`, { status: 'dropped', dropped_on: '2021-11-03' });
+
+  // Registro antigo sem dropped_on: não recebe data ao salvar o mesmo status nem ao curtir.
+  db.prepare(`INSERT INTO shelf (book_id, status, dropped_on) VALUES (?, 'dropped', NULL)`).run(legacyDrop.id);
+  await call('PUT', `/books/${legacyDrop.id}/shelf`, { status: 'dropped' });
+  await call('PUT', `/books/${legacyDrop.id}/shelf`, { liked: true });
+  assert.equal((await call('GET', `/books/${legacyDrop.id}`)).json.book.dropped_on, null);
+
+  // 2022: 3 leituras, 500 páginas, 0 abandonos, apenas 1 registro com formato (paper), gêneros com sobreposição.
+  const s2022 = (await call('GET', '/stats?year=2022')).json;
+  assert.equal(s2022.books, 3);
+  assert.equal(s2022.pages, 500);
+  assert.equal(s2022.rereads, 0);
+  assert.equal(s2022.dropped, 0);
+  assert.equal(s2022.months[1].books, 2);
+  assert.equal(s2022.months[1].pages, 500);
+  assert.deepEqual(s2022.formats, [{ id: 'paper', label: 'Papel', books: 1, pages: 300 }]);
+  assert.deepEqual(
+    s2022.decades.map((d) => [d.decade, d.count, d.books.map((b) => b.title)]),
+    [
+      [1980, 1, ['Sertão Mágico']],
+      [1990, 1, ['Planeta Sem Formato']],
+    ],
+  );
+  assert.deepEqual(
+    s2022.genres.map((g) => [g.id, g.books, g.pages]),
+    [
+      ['brazilian', 1, 300],
+      ['magic-realism', 1, 300],
+      ['scifi', 1, 200],
+    ],
+  );
+  // Favoritos de 2022 usam a nota de 2022: scifi (9) vem antes de multi (6), e bare (sem nota em 2022) fica fora.
+  assert.deepEqual(s2022.top.map((b) => [b.id, b.rating]), [[scifi.id, 9], [multi.id, 6]]);
+
+  // 2023: 2 releituras (ebook e audio), 1 abandono datado em 2023.
+  const s2023 = (await call('GET', '/stats?year=2023')).json;
+  assert.equal(s2023.books, 2);
+  assert.equal(s2023.rereads, 2);
+  assert.equal(s2023.dropped, 1);
+  assert.deepEqual(
+    s2023.formats.map((f) => [f.id, f.label, f.books, f.pages]),
+    [['ebook', 'E-book', 1, 300], ['audio', 'Áudio', 1, 0]],
+  );
+  assert.deepEqual(s2023.top.map((b) => [b.id, b.rating]), [[bare.id, 10], [multi.id, 10]]);
+
+  // 2021: ano que só tem abandonos aparece em `years` e retorna books=0 com dropped=1.
+  const s2021 = (await call('GET', '/stats?year=2021')).json;
+  assert.ok(s2021.years.includes(2021));
+  assert.equal(s2021.books, 0);
+  assert.equal(s2021.dropped, 1);
+  assert.deepEqual(s2021.genres, []);
+  assert.deepEqual(s2021.formats, []);
+
+  // Sempre: soma todos os anos, inclui o abandono legado sem data e conta releituras nos gêneros e formatos.
+  const all = (await call('GET', '/stats?year=all')).json;
+  assert.equal(all.books, 5);
+  assert.equal(all.unique_books, 3);
+  assert.equal(all.pages, 800);
+  assert.equal(all.rereads, 2);
+  assert.equal(all.dropped, 3);
+  assert.deepEqual(
+    all.by_year.map((y) => [y.year, y.books, y.pages]),
+    [[2021, 0, 0], [2022, 3, 500], [2023, 2, 300]],
+  );
+  assert.deepEqual(
+    all.genres.map((g) => [g.id, g.books, g.pages]),
+    [
+      ['brazilian', 2, 600],
+      ['magic-realism', 2, 600],
+      ['scifi', 1, 200],
+    ],
+  );
+  assert.deepEqual(
+    all.formats.map((f) => [f.id, f.books, f.pages]),
+    [['paper', 1, 300], ['ebook', 1, 300], ['audio', 1, 0]],
+  );
+
+  // Backup JSON preserva dropped_on sem inventar data para o abandono legado.
+  const backup = (await call('GET', '/export.json')).json;
+  db.exec(`DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  await call('POST', '/import', JSON.stringify(backup));
+  assert.equal((await call('GET', `/books/${drop2023.id}`)).json.book.dropped_on, '2023-04-12');
+  assert.equal((await call('GET', `/books/${legacyDrop.id}`)).json.book.dropped_on, null);
+  assert.equal((await call('GET', '/stats?year=2023')).json.dropped, 1);
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
+
+  // Tirar de `dropped` limpa `dropped_on`; voltar a entrar grava a data atual.
+  await call('PUT', `/books/${drop2023.id}/shelf`, { status: 'want' });
+  assert.equal((await call('GET', `/books/${drop2023.id}`)).json.book.dropped_on, null);
+  assert.equal((await call('GET', '/stats?year=2023')).json.dropped, 0);
+
+  // Ano sem metadados de gênero nem formato devolve listas vazias (UI oculta esses blocos).
+  const plainBook = await newBook('Só Título', { pages: null, subjects: [] });
+  await call('POST', `/books/${plainBook.id}/logs`, { finished_on: '2020-06-01' });
+  const s2020 = (await call('GET', '/stats?year=2020')).json;
+  assert.equal(s2020.books, 1);
+  assert.equal(s2020.pages, 0);
+  assert.deepEqual(s2020.genres, []);
+  assert.deepEqual(s2020.formats, []);
+  assert.deepEqual(s2020.top, []);
+});

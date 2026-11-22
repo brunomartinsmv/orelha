@@ -40,6 +40,7 @@ export function presentBook(row) {
       liked: !!row.liked,
       current_page: row.current_page,
       started_on: row.started_on,
+      dropped_on: row.dropped_on ?? null,
     } : {}),
     ...(row.my_rating !== undefined ? { rating: row.my_rating } : {}),
     ...(row.last_finished !== undefined ? { last_finished: row.last_finished } : {}),
@@ -48,7 +49,7 @@ export function presentBook(row) {
 
 // Colunas extras usadas em toda listagem: estado da estante + última nota.
 const BOOK_SELECT = `
-  SELECT b.*, s.status, s.liked, s.current_page, s.started_on,
+  SELECT b.*, s.status, s.liked, s.current_page, s.started_on, s.dropped_on,
     (SELECT rating FROM logs l WHERE l.book_id = b.id AND l.rating IS NOT NULL
       ORDER BY COALESCE(l.finished_on, l.created_at) DESC, l.id DESC LIMIT 1) AS my_rating,
     (SELECT MAX(finished_on) FROM logs l WHERE l.book_id = b.id) AS last_finished
@@ -314,20 +315,30 @@ function ensureShelf(bookId) {
 export function updateShelf(bookId, body) {
   requireBook(bookId);
   const VALID = ['want', 'reading', 'read', 'dropped', null];
+  if (body.status !== undefined && !VALID.includes(body.status)) throw new HttpError(400, 'Status inválido.');
+  const explicitStartedOn = body.started_on !== undefined ? asDate(body.started_on) : undefined;
+  const explicitDroppedOn = body.dropped_on !== undefined ? asDate(body.dropped_on) : undefined;
   return transaction(() => {
     ensureShelf(bookId);
+    const prev = db.prepare('SELECT status, dropped_on FROM shelf WHERE book_id = ?').get(bookId);
     if (body.status !== undefined) {
-      if (!VALID.includes(body.status)) throw new HttpError(400, 'Status inválido.');
+      // Só grava a data ao entrar em `dropped`; repetir o mesmo status não inventa data para registros antigos.
+      const nextDroppedOn = body.status === 'dropped'
+        ? (explicitDroppedOn !== undefined ? explicitDroppedOn : (prev.status === 'dropped' ? prev.dropped_on : today()))
+        : null;
       db.prepare(`UPDATE shelf SET status = ?, updated_at = datetime('now'),
         started_on = CASE WHEN ? = 'reading' THEN COALESCE(started_on, ?) WHEN ? IN ('want') OR ? IS NULL THEN NULL ELSE started_on END,
-        current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END
-        WHERE book_id = ?`).run(body.status, body.status, today(), body.status, body.status, body.status, bookId);
+        current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END,
+        dropped_on = ?
+        WHERE book_id = ?`).run(body.status, body.status, today(), body.status, body.status, body.status, nextDroppedOn, bookId);
+    } else if (explicitDroppedOn !== undefined) {
+      db.prepare(`UPDATE shelf SET dropped_on = CASE WHEN status = 'dropped' THEN ? ELSE NULL END WHERE book_id = ?`).run(explicitDroppedOn, bookId);
     }
     if (body.liked !== undefined) {
       db.prepare(`UPDATE shelf SET liked = ?, updated_at = datetime('now') WHERE book_id = ?`).run(body.liked ? 1 : 0, bookId);
     }
-    if (body.started_on !== undefined) {
-      db.prepare('UPDATE shelf SET started_on = ? WHERE book_id = ?').run(asDate(body.started_on), bookId);
+    if (explicitStartedOn !== undefined) {
+      db.prepare('UPDATE shelf SET started_on = ? WHERE book_id = ?').run(explicitStartedOn, bookId);
     }
     return presentBook(getBookRow(bookId));
   });
@@ -341,7 +352,7 @@ export function addProgress(bookId, body) {
   const day = asDate(body.on_day) || today();
   return transaction(() => {
     ensureShelf(bookId);
-    db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), updated_at = datetime('now') WHERE book_id = ?`)
+    db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), dropped_on = NULL, updated_at = datetime('now') WHERE book_id = ?`)
       .run(page, day, bookId);
     db.prepare('INSERT INTO progress (book_id, page, on_day) VALUES (?, ?, ?)').run(bookId, page, day);
     return presentBook(getBookRow(bookId));
@@ -394,7 +405,7 @@ export function createLog(bookId, body) {
     const { lastInsertRowid } = db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(bookId, f.finished_on, started, f.rating, f.review, f.spoilers, f.reread, f.format);
-    db.prepare(`UPDATE shelf SET status = 'read', current_page = NULL, started_on = NULL, liked = COALESCE(?, liked), updated_at = datetime('now') WHERE book_id = ?`)
+    db.prepare(`UPDATE shelf SET status = 'read', current_page = NULL, started_on = NULL, dropped_on = NULL, liked = COALESCE(?, liked), updated_at = datetime('now') WHERE book_id = ?`)
       .run(body.liked === undefined ? null : (body.liked ? 1 : 0), bookId);
     return presentLog(db.prepare('SELECT * FROM logs WHERE id = ?').get(lastInsertRowid));
   });
@@ -632,24 +643,45 @@ async function allSettledInBatches(tasks, size = 3) {
 
 // ---- Números ----
 
+const FORMAT_LABELS = { paper: 'Papel', ebook: 'E-book', audio: 'Áudio' };
+const FORMAT_ORDER = ['paper', 'ebook', 'audio'];
+
 export function stats({ year }) {
   const allTime = !year || year === 'all';
-  const rows = db.prepare(`SELECT l.*, b.pages, b.authors, b.year AS pub_year FROM logs l JOIN books b ON b.id = l.book_id
+  const yearStr = allTime ? null : String(year);
+  const rows = db.prepare(`SELECT l.*, b.title, b.pages, b.authors, b.year AS pub_year, b.subjects FROM logs l JOIN books b ON b.id = l.book_id
     WHERE l.finished_on IS NOT NULL ${allTime ? '' : 'AND substr(l.finished_on, 1, 4) = ?'}
-    ORDER BY l.finished_on`).all(...(allTime ? [] : [String(year)]));
+    ORDER BY l.finished_on, l.id`).all(...(allTime ? [] : [yearStr]));
 
-  const years = db.prepare(`SELECT DISTINCT substr(finished_on, 1, 4) AS y FROM logs WHERE finished_on IS NOT NULL ORDER BY y DESC`).all().map((r) => Number(r.y));
+  const years = db.prepare(`SELECT DISTINCT y FROM (
+      SELECT substr(finished_on, 1, 4) AS y FROM logs WHERE finished_on IS NOT NULL
+      UNION
+      SELECT substr(dropped_on, 1, 4) AS y FROM shelf WHERE status = 'dropped' AND dropped_on IS NOT NULL
+    ) ORDER BY y DESC`).all().map((r) => Number(r.y));
+
+  const dropped = allTime
+    ? db.prepare(`SELECT COUNT(*) AS n FROM shelf WHERE status = 'dropped'`).get().n
+    : db.prepare(`SELECT COUNT(*) AS n FROM shelf WHERE status = 'dropped' AND substr(dropped_on, 1, 4) = ?`).get(yearStr).n;
+
   const ratings = Array(10).fill(0);
   const months = Array.from({ length: 12 }, () => ({ books: 0, pages: 0 }));
   const byYear = new Map(years.map((y) => [y, { year: y, books: 0, pages: 0 }]));
   const authors = new Map();
   const decades = new Map();
+  const genres = new Map();
+  const formats = new Map();
+  const periodRatings = new Map();
   let pages = 0, ratingSum = 0, rated = 0, rereads = 0, daysSum = 0, daysCount = 0;
 
   for (const r of rows) {
     const p = r.pages || 0;
     pages += p;
-    if (r.rating) { ratings[r.rating - 1]++; ratingSum += r.rating; rated++; }
+    if (r.rating) {
+      ratings[r.rating - 1]++;
+      ratingSum += r.rating;
+      rated++;
+      periodRatings.set(r.book_id, { rating: r.rating, finished_on: r.finished_on });
+    }
     if (r.reread) rereads++;
     const m = months[Number(r.finished_on.slice(5, 7)) - 1];
     m.books++; m.pages += p;
@@ -660,9 +692,22 @@ export function stats({ year }) {
       entry.books++; entry.pages += p;
       authors.set(a, entry);
     }
+    for (const gid of rec.genresOf(JSON.parse(r.subjects || '[]'))) {
+      const entry = genres.get(gid) || { id: gid, label: rec.genre(gid).label, books: 0, pages: 0 };
+      entry.books++; entry.pages += p;
+      genres.set(gid, entry);
+    }
+    if (r.format && FORMAT_LABELS[r.format]) {
+      const entry = formats.get(r.format) || { id: r.format, label: FORMAT_LABELS[r.format], books: 0, pages: 0 };
+      entry.books++; entry.pages += p;
+      formats.set(r.format, entry);
+    }
     if (r.pub_year) {
       const d = Math.floor(r.pub_year / 10) * 10;
-      decades.set(d, (decades.get(d) || 0) + 1);
+      const entry = decades.get(d) || { decade: d, count: 0, books: new Map() };
+      entry.count++;
+      if (!entry.books.has(r.book_id)) entry.books.set(r.book_id, { id: r.book_id, title: r.title, year: r.pub_year });
+      decades.set(d, entry);
     }
     if (r.started_on) {
       const days = (Date.parse(r.finished_on) - Date.parse(r.started_on)) / 86_400_000;
@@ -674,7 +719,15 @@ export function stats({ year }) {
   const books = ids.map((id) => presentBook(getBookRow(id)));
   const withPages = books.filter((b) => b.pages);
   const sortedByPages = [...withPages].sort((a, b) => b.pages - a.pages);
-  const top = [...books].filter((b) => b.rating).sort((a, b) => b.rating - a.rating || (b.last_finished || '').localeCompare(a.last_finished || '')).slice(0, 5);
+  // Favoritos do período usam a nota registrada dentro do próprio período, não a última nota global do livro.
+  const top = books
+    .filter((b) => periodRatings.has(b.id))
+    .map((b) => {
+      const pr = periodRatings.get(b.id);
+      return { ...b, rating: pr.rating, last_finished: pr.finished_on };
+    })
+    .sort((a, b) => b.rating - a.rating || (b.last_finished || '').localeCompare(a.last_finished || ''))
+    .slice(0, 5);
 
   return {
     year: allTime ? 'all' : Number(year),
@@ -684,12 +737,21 @@ export function stats({ year }) {
     pages,
     average_rating: rated ? ratingSum / rated / 2 : null,
     rereads,
+    dropped,
     average_days: daysCount ? daysSum / daysCount : null,
     ratings,
     months,
     by_year: [...byYear.values()].sort((a, b) => a.year - b.year),
+    genres: [...genres.values()].sort((a, b) => b.books - a.books || b.pages - a.pages || a.label.localeCompare(b.label, 'pt-BR')),
+    formats: [...formats.values()].sort((a, b) => b.books - a.books || b.pages - a.pages || FORMAT_ORDER.indexOf(a.id) - FORMAT_ORDER.indexOf(b.id)),
     authors: [...authors.values()].sort((a, b) => b.books - a.books || b.pages - a.pages).slice(0, 6),
-    decades: [...decades.entries()].map(([decade, count]) => ({ decade, count })).sort((a, b) => a.decade - b.decade),
+    decades: [...decades.values()]
+      .map(({ decade, count, books: list }) => ({
+        decade,
+        count,
+        books: [...list.values()].sort((a, b) => a.year - b.year || a.title.localeCompare(b.title, 'pt-BR')),
+      }))
+      .sort((a, b) => a.decade - b.decade),
     longest: sortedByPages[0] || null,
     shortest: sortedByPages[sortedByPages.length - 1] || null,
     top,

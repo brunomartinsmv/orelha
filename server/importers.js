@@ -632,14 +632,15 @@ export function importOrelhaJson(data) {
       const liked = s.liked ? 1 : 0;
       const currentPage = safeInt(s.current_page);
       const startedOn = normalizeDate(s.started_on);
+      const droppedOn = normalizeDate(s.dropped_on);
       const demo = s.demo ? 1 : 0;
       const updatedAt = safeTimestamp(s.updated_at);
       const cur = db.prepare('SELECT * FROM shelf WHERE book_id = ?').get(bookId);
       if (!cur) {
         const allowRunning = status === 'reading' || status === 'dropped';
-        db.prepare(`INSERT INTO shelf (book_id, status, liked, current_page, started_on, demo, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
-          .run(bookId, status, liked, allowRunning ? currentPage : null, allowRunning ? startedOn : null, demo, updatedAt);
+        db.prepare(`INSERT INTO shelf (book_id, status, liked, current_page, started_on, dropped_on, demo, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
+          .run(bookId, status, liked, allowRunning ? currentPage : null, allowRunning ? startedOn : null, status === 'dropped' ? droppedOn : null, demo, updatedAt);
       } else {
         const finalStatus = cur.status ?? status;
         const allowRunning = finalStatus === 'reading' || finalStatus === 'dropped';
@@ -647,9 +648,10 @@ export function importOrelhaJson(data) {
             status = ?,
             liked = MAX(liked, ?),
             current_page = CASE WHEN ? THEN COALESCE(current_page, ?) ELSE current_page END,
-            started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END
+            started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END,
+            dropped_on = CASE WHEN ? THEN COALESCE(dropped_on, ?) ELSE dropped_on END
           WHERE book_id = ?`)
-          .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, bookId);
+          .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, finalStatus === 'dropped' ? 1 : 0, droppedOn, bookId);
       }
     }
 
