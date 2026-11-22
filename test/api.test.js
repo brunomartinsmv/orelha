@@ -1050,6 +1050,33 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.equal(afterC125.dropped, 1);
   assert.deepEqual(afterC125.years, []);
 
+  // Restaurar backup antigo (`drops: []`) e depois backup da mesma biblioteca já migrada (com `created_at` distinto)
+  // mantém 1 único abandono em Sempre em ambas as ordens, sem fundir ocorrências distintas do mesmo livro.
+  const migratedSameLib = {
+    app: 'orelha',
+    books: [{ id: 'ext_drop_id', title: 'Retomado Local', authors: ['Autora Local'], isbn: '9788500000801' }],
+    shelf: [{ book_id: 'ext_drop_id', status: 'dropped' }],
+    drops: [{ book_id: 'ext_drop_id', dropped_on: null, created_at: '2025-01-01 10:00:00' }],
+    logs: [],
+  };
+  await call('POST', '/import', JSON.stringify(migratedSameLib));
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 1);
+
+  // Ordem inversa (migrado -> antigo) + ocorrência datada distinta do mesmo livro preservada como 2 em Sempre.
+  db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  await call('POST', '/import', JSON.stringify(migratedSameLib));
+  await call('POST', '/import', JSON.stringify(c125Backup));
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 1);
+  await call('POST', '/import', JSON.stringify({
+    ...migratedSameLib,
+    drops: [
+      { book_id: 'ext_drop_id', dropped_on: null, created_at: '2025-01-01 10:00:00' },
+      { book_id: 'ext_drop_id', dropped_on: '2025-07-01', created_at: '2025-07-01 10:00:00' },
+    ],
+  }));
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 2);
+  assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 1);
+
   // Ano sem metadados de gênero, formato nem nota devolve listas/notas vazias (UI oculta esses blocos).
   const plainBook = await newBook('Só Título', { pages: null, subjects: [] });
   await call('POST', `/books/${plainBook.id}/logs`, { finished_on: '2020-06-01' });

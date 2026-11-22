@@ -713,10 +713,9 @@ export function importOrelhaJson(data) {
     }
 
     const restoreDrop = (bookId, droppedOn, demo, createdAt) => {
-      const match = preexistingDrops.find((c) => !usedDropIds.has(c.id)
-        && c.book_id === bookId
-        && (c.dropped_on ?? null) === droppedOn
-        && (!createdAt || c.created_at === createdAt));
+      const sameKey = (c) => !usedDropIds.has(c.id) && c.book_id === bookId && (c.dropped_on ?? null) === droppedOn;
+      const match = (createdAt && preexistingDrops.find((c) => sameKey(c) && c.created_at === createdAt))
+        || preexistingDrops.find(sameKey);
       if (match) {
         usedDropIds.add(match.id);
       } else {
