@@ -315,7 +315,7 @@ function ensureShelf(bookId) {
 function preserveLegacyDrop(bookId, prevStatus) {
   if (prevStatus !== 'dropped') return;
   const hasDrop = db.prepare('SELECT 1 FROM drops WHERE book_id = ? LIMIT 1').get(bookId);
-  if (!hasDrop) db.prepare('INSERT INTO drops (book_id, dropped_on) VALUES (?, NULL)').run(bookId);
+  if (!hasDrop) db.prepare('INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, NULL, NULL)').run(bookId);
 }
 
 export function updateShelf(bookId, body) {
@@ -335,7 +335,7 @@ export function updateShelf(bookId, body) {
         WHERE book_id = ?`).run(body.status, body.status, today(), body.status, body.status, body.status, bookId);
       // Registra o evento apenas ao entrar em `dropped`; repetir o mesmo status não duplica nem data legados.
       if (body.status === 'dropped' && prev.status !== 'dropped') {
-        db.prepare('INSERT INTO drops (book_id, dropped_on) VALUES (?, ?)').run(bookId, explicitDroppedOn || today());
+        db.prepare(`INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, ?, datetime('now'))`).run(bookId, explicitDroppedOn || today());
       }
     }
     if (body.liked !== undefined) {

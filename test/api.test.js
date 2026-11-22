@@ -1002,7 +1002,8 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.deepEqual(afterCycle.years, [2025, 2023, 2022, 2021]);
   assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 1);
 
-  // Backup no formato anterior (`shelf[].dropped_on` sem a chave `drops`): recupera a data no livro remapeado de forma idempotente.
+  // Backup no formato anterior (`shelf[].dropped_on` sem a chave `drops`): recupera a data no livro remapeado
+  // e concilia em ambas as ordens com o backup migrado da mesma biblioteca sem duplicar.
   db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
   const oldFormatBackup = {
     app: 'orelha',
@@ -1010,24 +1011,25 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
     shelf: [{ book_id: 'old_drop_1', status: 'dropped', dropped_on: '2021-02-03' }],
     logs: [],
   };
+  const oldMigratedBackup = {
+    app: 'orelha',
+    books: [{ id: 'old_drop_1', title: 'Backup Anterior', authors: ['Autora'] }],
+    shelf: [{ book_id: 'old_drop_1', status: 'dropped', dropped_on: '2021-02-03' }],
+    drops: [{ book_id: 'old_drop_1', dropped_on: '2021-02-03', created_at: '2026-11-22 10:00:00' }],
+    logs: [],
+  };
   const oldRes = (await call('POST', '/import', JSON.stringify(oldFormatBackup))).json;
   assert.equal(oldRes.skipped, 0);
   await call('POST', '/import', JSON.stringify(oldFormatBackup));
+  await call('POST', '/import', JSON.stringify(oldMigratedBackup));
   const sOld2021 = (await call('GET', '/stats?year=2021')).json;
   assert.equal(sOld2021.dropped, 1);
   assert.ok(sOld2021.years.includes(2021));
 
-  // Quando o backup já traz `drops` (fonte de verdade), `shelf[].dropped_on` residual não duplica o evento.
+  // Ordem inversa (migrado -> formato anterior) também mantém exatamente 1 abandono em 2021.
   db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
-  const migratedBackup = {
-    app: 'orelha',
-    books: [{ id: 'mig_drop_1', title: 'Backup Migrado', authors: ['Autora'] }],
-    shelf: [{ book_id: 'mig_drop_1', status: 'dropped', dropped_on: '2021-02-03' }],
-    drops: [{ book_id: 'mig_drop_1', dropped_on: '2021-02-03' }],
-    logs: [],
-  };
-  await call('POST', '/import', JSON.stringify(migratedBackup));
-  await call('POST', '/import', JSON.stringify(migratedBackup));
+  await call('POST', '/import', JSON.stringify(oldMigratedBackup));
+  await call('POST', '/import', JSON.stringify(oldFormatBackup));
   assert.equal((await call('GET', '/stats?year=2021')).json.dropped, 1);
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 1);
 
@@ -1084,6 +1086,18 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   }));
   assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 2);
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
+
+  // Importação CSV com livro abandonado preserva o abandono histórico mesmo quando o livro local já está em `reading`.
+  db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  const csvReading = await newBook('Lendo Localmente', { authors: 'Autora CSV', isbn: '9788500000802' });
+  await call('PUT', `/books/${csvReading.id}/shelf`, { status: 'reading' });
+  const csvDrops = `Title,Author,ISBN13,Bookshelves\nLendo Localmente,Autora CSV,9788500000802,abandonei\nNovo Abandonado CSV,Autora CSV,9788500000803,abandonei\n`;
+  await call('POST', '/import', csvDrops);
+  await call('POST', '/import', csvDrops);
+  assert.equal((await call('GET', `/books/${csvReading.id}`)).json.book.status, 'reading');
+  const afterCsvDrops = (await call('GET', '/stats?year=all')).json;
+  assert.equal(afterCsvDrops.dropped, 2);
+  assert.deepEqual(afterCsvDrops.years, []);
 
   // Ano sem metadados de gênero, formato nem nota devolve listas/notas vazias (UI oculta esses blocos).
   const plainBook = await newBook('Só Título', { pages: null, subjects: [] });

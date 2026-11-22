@@ -391,11 +391,8 @@ export function importCsv(text) {
             started_on = CASE WHEN COALESCE(status, ?) = 'reading' THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
           .run(effectiveStatus, item.liked ? 1 : 0, effectiveStatus, shelfStartedOn, bookId);
-        if (effectiveStatus === 'dropped') {
-          const curStatus = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId)?.status;
-          if (curStatus === 'dropped' && !db.prepare('SELECT 1 FROM drops WHERE book_id = ? LIMIT 1').get(bookId)) {
-            db.prepare('INSERT INTO drops (book_id, dropped_on) VALUES (?, NULL)').run(bookId);
-          }
+        if (effectiveStatus === 'dropped' && !db.prepare('SELECT 1 FROM drops WHERE book_id = ? LIMIT 1').get(bookId)) {
+          db.prepare('INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, NULL, NULL)').run(bookId);
         }
       }
       if (hasLog) {
@@ -714,15 +711,21 @@ export function importOrelhaJson(data) {
 
     const restoreDrop = (bookId, droppedOn, demo, createdAt) => {
       const sameKey = (c) => !usedDropIds.has(c.id) && c.book_id === bookId && (c.dropped_on ?? null) === droppedOn;
-      // Para abandonos datados, `created_at` distingue ocorrências distintas no mesmo dia em backups separados;
-      // para abandonos legados sem data (`droppedOn === null`), concilia por livro entre snapshots pré e pós-migração.
+      // Eventos com `created_at` explícito de ambos os lados só casam com o mesmo timestamp;
+      // eventos migrados/fallback (`created_at === null`) ou legados sem data (`droppedOn === null`) conciliam em qualquer ordem.
       const match = (createdAt && preexistingDrops.find((c) => sameKey(c) && c.created_at === createdAt))
-        || ((!createdAt || droppedOn === null) ? preexistingDrops.find(sameKey) : null);
+        || (droppedOn === null || !createdAt
+          ? preexistingDrops.find(sameKey)
+          : preexistingDrops.find((c) => sameKey(c) && !c.created_at));
       if (match) {
         usedDropIds.add(match.id);
+        if (createdAt && !match.created_at) {
+          db.prepare('UPDATE drops SET created_at = ? WHERE id = ?').run(createdAt, match.id);
+          match.created_at = createdAt;
+        }
       } else {
-        db.prepare(`INSERT INTO drops (book_id, dropped_on, demo, created_at)
-          VALUES (?, ?, ?, COALESCE(?, datetime('now')))`).run(bookId, droppedOn, demo, createdAt);
+        db.prepare('INSERT INTO drops (book_id, dropped_on, demo, created_at) VALUES (?, ?, ?, ?)')
+          .run(bookId, droppedOn, demo, createdAt ?? null);
       }
     };
 
