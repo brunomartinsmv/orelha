@@ -11,10 +11,12 @@ process.env.ORELHA_NO_QUOTES = '1';
 
 const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
+const { pruneSyncOps } = await import('../server/library.js');
 const {
   applyPendingToPath,
   classifyHttpResponse,
   createMemoryStore,
+  createStorageLock,
   createSyncEngine,
   patchDataWithConfirmed,
 } = await import('../public/app/sync.js');
@@ -502,4 +504,81 @@ test('patchDataWithConfirmed atualiza cache em memória sem perder a mudança co
   assert.equal(memory.get('/quotes').data[0].text, 'Confirmado na memória.');
   assert.equal(memory.get('/profile').data.counts.quotes, cachedProfile.counts.quotes + 1);
   assert.equal(memory.get('/profile').data.counts.reading, cachedProfile.counts.reading + 1);
+});
+
+// `staleReads` simula abas em processos diferentes: as primeiras leituras ainda não veem a escrita da outra.
+function fakeStorage({ staleReads = 0 } = {}) {
+  const map = new Map();
+  return {
+    getItem: (k) => {
+      if (staleReads > 0) { staleReads -= 1; return null; }
+      return map.has(k) ? map.get(k) : null;
+    },
+    setItem: (k, v) => { map.set(k, String(v)); },
+    removeItem: (k) => { map.delete(k); },
+  };
+}
+
+test('trava em localStorage: escritas quase simultâneas deixam só uma aba entrar', async () => {
+  const storage = fakeStorage({ staleReads: 2 });
+  let busy = 0;
+  let inside = 0;
+  let maxInside = 0;
+  const work = async () => {
+    inside += 1;
+    maxInside = Math.max(maxInside, inside);
+    await new Promise((r) => setTimeout(r, 30));
+    inside -= 1;
+    return 'feito';
+  };
+  // Ambas leem a trava livre antes de qualquer gravação; a releitura decide quem fica.
+  const lockA = createStorageLock({ storage, ownerId: 'A', settleMs: 10, onBusy: () => { busy += 1; } });
+  const lockB = createStorageLock({ storage, ownerId: 'B', settleMs: 10, onBusy: () => { busy += 1; } });
+  const results = await Promise.all([lockA(work), lockB(work)]);
+  assert.equal(maxInside, 1);
+  assert.equal(busy, 1);
+  assert.deepEqual(results.filter(Boolean), ['feito']);
+  assert.equal(storage.getItem('orelha.sync.lock'), null);
+});
+
+test('trava em localStorage: respeita dono ativo, assume trava vencida e renova durante a drenagem', async () => {
+  const storage = fakeStorage();
+  let clock = 1_000;
+  const now = () => clock;
+
+  storage.setItem('orelha.sync.lock', JSON.stringify({ owner: 'outra', expiresAt: clock + 5_000 }));
+  let busy = 0;
+  const lock = createStorageLock({ storage, ownerId: 'eu', settleMs: 0, renewMs: 5, ttlMs: 100, now, onBusy: () => { busy += 1; } });
+  assert.equal(await lock(async () => 'não roda'), undefined);
+  assert.equal(busy, 1);
+
+  clock += 10_000; // a trava da outra aba venceu
+  const seen = [];
+  const out = await lock(async () => {
+    seen.push(JSON.parse(storage.getItem('orelha.sync.lock')).expiresAt);
+    clock += 50;
+    await new Promise((r) => setTimeout(r, 30));
+    seen.push(JSON.parse(storage.getItem('orelha.sync.lock')).expiresAt);
+    return 'ok';
+  });
+  assert.equal(out, 'ok');
+  assert.ok(seen[1] > seen[0], 'o prazo da trava deve ser renovado enquanto a fila drena');
+  assert.equal(storage.getItem('orelha.sync.lock'), null);
+
+  // Armazenamento bloqueado: segue sem trava em vez de travar a fila.
+  const broken = { getItem() { throw new Error('bloqueado'); }, setItem() { throw new Error('bloqueado'); }, removeItem() {} };
+  assert.equal(await createStorageLock({ storage: broken, ownerId: 'x', settleMs: 0 })(async () => 'sem trava'), 'sem trava');
+});
+
+test('sync_ops antigos são podados e os recentes continuam deduplicando', async () => {
+  const book = await createBook('Livro Poda');
+  db.prepare(`INSERT INTO sync_ops (op_id, kind, book_id, response_json, created_at) VALUES (?, 'quote', ?, '{}', datetime('now', '-31 days'))`)
+    .run('op-velho', book.id);
+  const fresh = await apiJson('POST', `/books/${book.id}/quotes`, { text: 'Recente.', op_id: 'op-recente' });
+  assert.equal(fresh.status, 200);
+
+  pruneSyncOps();
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM sync_ops WHERE op_id = 'op-velho'`).get().n, 0);
+  const replay = await apiJson('POST', `/books/${book.id}/quotes`, { text: 'Recente.', op_id: 'op-recente' });
+  assert.equal(replay.json.id, fresh.json.id);
 });

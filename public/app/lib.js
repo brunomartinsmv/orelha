@@ -5,6 +5,7 @@ import {
   classifyHttpResponse,
   createIndexedDbStore,
   createMemoryStore,
+  createStorageLock,
   createSyncEngine,
   patchDataWithConfirmed,
 } from './sync.js';
@@ -81,27 +82,20 @@ async function browserTransport({ method, path, body }) {
   return classifyHttpResponse(res, data);
 }
 
+// Outra aba está drenando: tenta de novo depois, senão a fila só andaria no próximo evento.
+let storageLock = (fn) => fn();
+try {
+  // Ler `localStorage` já pode lançar em contextos com armazenamento bloqueado.
+  if (typeof localStorage !== 'undefined') {
+    storageLock = createStorageLock({ storage: localStorage, ownerId: tabId, key: LOCK_KEY, onBusy: () => setTimeout(() => scheduleRetry(), 0) });
+  }
+} catch { /* sem armazenamento: segue sem trava */ }
+
 async function browserLock(fn) {
   if (navigator?.locks?.request) {
     return navigator.locks.request('orelha-sync', fn);
   }
-  try {
-    const raw = localStorage.getItem(LOCK_KEY);
-    if (raw) {
-      const held = JSON.parse(raw);
-      if (held && held.owner !== tabId && held.expiresAt > Date.now()) return undefined;
-    }
-    localStorage.setItem(LOCK_KEY, JSON.stringify({ owner: tabId, expiresAt: Date.now() + 20_000 }));
-  } catch { /* modo privado */ }
-  try {
-    return await fn();
-  } finally {
-    try {
-      const raw = localStorage.getItem(LOCK_KEY);
-      const held = raw ? JSON.parse(raw) : null;
-      if (held?.owner === tabId) localStorage.removeItem(LOCK_KEY);
-    } catch { /* modo privado */ }
-  }
+  return storageLock(fn);
 }
 
 function broadcastSync() {

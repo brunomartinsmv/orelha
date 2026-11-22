@@ -453,6 +453,68 @@ export function createIndexedDbStore(dbName = 'orelha-offline') {
   };
 }
 
+// ---------- Trava entre abas sem Web Locks ----------
+
+// `localStorage` não tem escrita condicional, então a trava é tomada em duas etapas: grava o dono,
+// espera `settleMs` e relê. Se duas abas gravarem quase juntas, a última escrita vence e só ela
+// se confirma na releitura. Enquanto a fila drena, o prazo é renovado para não expirar no meio.
+// Sem acesso ao armazenamento (modo privado) segue sem trava; o `op_id` no servidor evita duplicatas.
+export function createStorageLock({
+  storage,
+  ownerId,
+  key = 'orelha.sync.lock',
+  ttlMs = 20_000,
+  settleMs = 50,
+  renewMs = 5_000,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  onBusy = () => {},
+}) {
+  const read = () => {
+    const raw = storage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  };
+  const heldByOther = (held) => !!held && held.owner !== ownerId && held.expiresAt > now();
+  const write = () => storage.setItem(key, JSON.stringify({ owner: ownerId, expiresAt: now() + ttlMs }));
+
+  async function acquire() {
+    try {
+      if (heldByOther(read())) return false;
+      write();
+    } catch {
+      return true;
+    }
+    await sleep(settleMs);
+    try {
+      return read()?.owner === ownerId;
+    } catch {
+      return true;
+    }
+  }
+
+  function release() {
+    try {
+      if (read()?.owner === ownerId) storage.removeItem(key);
+    } catch { /* modo privado */ }
+  }
+
+  return async function storageLock(fn) {
+    if (!(await acquire())) {
+      onBusy();
+      return undefined;
+    }
+    const renew = setInterval(() => {
+      try { if (read()?.owner === ownerId) write(); } catch { /* modo privado */ }
+    }, renewMs);
+    try {
+      return await fn();
+    } finally {
+      clearInterval(renew);
+      release();
+    }
+  };
+}
+
 // ---------- Motor de sincronização ----------
 
 const defaultRandomId = () => (

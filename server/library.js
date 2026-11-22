@@ -337,8 +337,20 @@ function findSyncOp(opId, kind, bookId) {
   return JSON.parse(row.response_json);
 }
 
+// Uma resposta perdida é reenviada pela fila em minutos ou dias; 30 dias cobrem isso com folga
+// sem deixar `sync_ops` crescer para sempre.
+const SYNC_OPS_TTL_DAYS = 30;
+const SYNC_OPS_PRUNE_EVERY_MS = 60 * 60 * 1000;
+let lastSyncOpsPrune = 0;
+
+export function pruneSyncOps(days = SYNC_OPS_TTL_DAYS) {
+  lastSyncOpsPrune = Date.now();
+  return db.prepare(`DELETE FROM sync_ops WHERE created_at < datetime('now', ?)`).run(`-${days} days`).changes;
+}
+
 function saveSyncOp(opId, kind, bookId, response) {
   if (!opId) return;
+  if (Date.now() - lastSyncOpsPrune > SYNC_OPS_PRUNE_EVERY_MS) pruneSyncOps();
   db.prepare('INSERT INTO sync_ops (op_id, kind, book_id, response_json) VALUES (?, ?, ?, ?)')
     .run(opId, kind, bookId, JSON.stringify(response));
 }
