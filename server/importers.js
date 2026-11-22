@@ -391,6 +391,9 @@ export function importCsv(text) {
             started_on = CASE WHEN COALESCE(status, ?) = 'reading' THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
           .run(effectiveStatus, item.liked ? 1 : 0, effectiveStatus, shelfStartedOn, bookId);
+        if (effectiveStatus === 'dropped' && !db.prepare('SELECT 1 FROM drops WHERE book_id = ? LIMIT 1').get(bookId)) {
+          db.prepare('INSERT INTO drops (book_id, dropped_on, created_at) VALUES (?, NULL, NULL)').run(bookId);
+        }
       }
       if (hasLog) {
         const incoming = {
@@ -513,6 +516,8 @@ export function importOrelhaJson(data) {
 
     const preexistingLogs = db.prepare('SELECT * FROM logs').all();
     const usedLogIds = new Set();
+    const preexistingDrops = db.prepare('SELECT * FROM drops').all();
+    const usedDropIds = new Set();
     const preexistingProgress = db.prepare('SELECT * FROM progress').all();
     const usedProgressIds = new Set();
     const preexistingQuotes = db.prepare('SELECT * FROM quotes').all();
@@ -625,6 +630,9 @@ export function importOrelhaJson(data) {
       if (source === 'import' && !safeOlKey && !detailsAt && !userEdited) needsEnrich = true;
     }
 
+    const hasDrops = Array.isArray(data.drops);
+    const shelfFallbackDrops = [];
+    const shelfLegacyDropped = [];
     for (const s of Array.isArray(data.shelf) ? data.shelf : []) {
       const bookId = bookIdMap.get(safeBookId(s?.book_id));
       if (!bookId) { result.skipped++; continue; }
@@ -650,6 +658,15 @@ export function importOrelhaJson(data) {
             started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
           .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, bookId);
+      }
+      // Backups sem a coleção `drops` (formato anterior com `shelf[].dropped_on` ou legados sem data)
+      // e backups com `drops` onde uma estante `dropped` ainda não tinha evento materializado.
+      if (!hasDrops) {
+        const shelfDroppedOn = normalizeDate(s.dropped_on);
+        if (shelfDroppedOn) shelfFallbackDrops.push({ book_id: bookId, dropped_on: shelfDroppedOn, demo });
+        else if (status === 'dropped') shelfFallbackDrops.push({ book_id: bookId, dropped_on: null, demo });
+      } else if (status === 'dropped') {
+        shelfLegacyDropped.push({ book_id: bookId, demo });
       }
     }
 
@@ -690,6 +707,69 @@ export function importOrelhaJson(data) {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
         .run(bookId, finishedOn, startedOn, rating, review, spoilers, reread, format, safeKey, demo, createdAt);
       result.logs_added++;
+    }
+
+    const incomingDrops = [];
+    if (hasDrops) {
+      const backupBooksWithDrops = new Set();
+      for (const d of data.drops) {
+        const bookId = bookIdMap.get(safeBookId(d?.book_id));
+        const hasRawDate = d?.dropped_on !== null && d?.dropped_on !== undefined && String(d.dropped_on).trim() !== '';
+        const droppedOn = hasRawDate ? normalizeDate(d.dropped_on) : null;
+        if (!bookId || (hasRawDate && !droppedOn)) { result.skipped++; continue; }
+        backupBooksWithDrops.add(bookId);
+        incomingDrops.push({ bookId, droppedOn, demo: d.demo ? 1 : 0, createdAt: safeTimestamp(d.created_at), matched: false });
+      }
+      // Backup com `drops` mas estante `dropped` sem evento para aquele livro: preserva abandono sem data.
+      for (const d of shelfLegacyDropped) {
+        if (!backupBooksWithDrops.has(d.book_id)) {
+          incomingDrops.push({ bookId: d.book_id, droppedOn: null, demo: d.demo, createdAt: null, matched: false });
+        }
+      }
+    } else {
+      for (const d of shelfFallbackDrops) {
+        incomingDrops.push({ bookId: d.book_id, droppedOn: d.dropped_on, demo: d.demo, createdAt: null, matched: false });
+      }
+    }
+
+    // Passo 1: reserva primeiro todas as correspondências exatas por (book_id, dropped_on, created_at).
+    const sameDropKey = (item) => (c) => !usedDropIds.has(c.id) && c.book_id === item.bookId && (c.dropped_on ?? null) === item.droppedOn;
+    for (const item of incomingDrops) {
+      if (!item.createdAt) continue;
+      const exact = preexistingDrops.find((c) => sameDropKey(item)(c) && c.created_at === item.createdAt);
+      if (exact) {
+        usedDropIds.add(exact.id);
+        item.matched = true;
+      }
+    }
+    // Passo 2: eventos datados com horário explícito só podem casar com linhas locais sem horário (`created_at IS NULL`);
+    // conciliá-los antes evita que uma entrada sem horário consuma esse candidato único.
+    for (const item of incomingDrops) {
+      if (item.matched || item.droppedOn === null || !item.createdAt) continue;
+      const match = preexistingDrops.find((c) => sameDropKey(item)(c) && !c.created_at);
+      if (match) {
+        usedDropIds.add(match.id);
+        db.prepare('UPDATE drops SET created_at = ? WHERE id = ?').run(item.createdAt, match.id);
+        match.created_at = item.createdAt;
+        item.matched = true;
+      }
+    }
+    // Passo 3: concilia as entradas restantes (sem horário ou legadas sem data) nas linhas livres, ou insere novas.
+    for (const item of incomingDrops) {
+      if (item.matched) continue;
+      const match = item.droppedOn === null || !item.createdAt
+        ? preexistingDrops.find(sameDropKey(item))
+        : null;
+      if (match) {
+        usedDropIds.add(match.id);
+        if (item.createdAt && !match.created_at) {
+          db.prepare('UPDATE drops SET created_at = ? WHERE id = ?').run(item.createdAt, match.id);
+          match.created_at = item.createdAt;
+        }
+      } else {
+        db.prepare('INSERT INTO drops (book_id, dropped_on, demo, created_at) VALUES (?, ?, ?, ?)')
+          .run(item.bookId, item.droppedOn, item.demo, item.createdAt ?? null);
+      }
     }
 
     for (const p of Array.isArray(data.progress) ? data.progress : []) {

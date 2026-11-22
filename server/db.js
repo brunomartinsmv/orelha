@@ -107,12 +107,61 @@ CREATE TABLE IF NOT EXISTS favorites (
 
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 
+CREATE TABLE IF NOT EXISTS drops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  dropped_on TEXT,
+  demo INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS drops_book ON drops(book_id);
+CREATE INDEX IF NOT EXISTS drops_date ON drops(dropped_on);
+
 CREATE TABLE IF NOT EXISTS api_cache (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
 `);
+
+// Se `drops` foi criada com `dropped_on` ou `created_at` NOT NULL, recria permitindo NULL
+// para distinguir eventos explícitos dos migrados/legados sem timestamp próprio.
+const dropCols = db.prepare('PRAGMA table_info(drops)').all();
+if (dropCols.some((c) => (c.name === 'dropped_on' || c.name === 'created_at') && c.notnull)) {
+  transaction(() => {
+    db.exec(`
+      DROP TABLE IF EXISTS drops_new;
+      CREATE TABLE drops_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        dropped_on TEXT,
+        demo INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT
+      );
+      INSERT INTO drops_new (id, book_id, dropped_on, demo, created_at)
+        SELECT id, book_id, dropped_on, demo, created_at FROM drops;
+      DROP TABLE drops;
+      ALTER TABLE drops_new RENAME TO drops;
+      CREATE INDEX IF NOT EXISTS drops_book ON drops(book_id);
+      CREATE INDEX IF NOT EXISTS drops_date ON drops(dropped_on);
+    `);
+  });
+}
+
+// Migra eventuais datas gravadas em `shelf.dropped_on` com `created_at = NULL` (sem fabricar horário do evento).
+const shelfColumns = db.prepare('PRAGMA table_info(shelf)').all().map((c) => c.name);
+if (shelfColumns.includes('dropped_on')) {
+  db.exec(`INSERT INTO drops (book_id, dropped_on, demo, created_at)
+    SELECT s.book_id, s.dropped_on, s.demo, NULL FROM shelf s
+    WHERE s.dropped_on IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id AND d.dropped_on = s.dropped_on)`);
+}
+
+// Materializa abandonos legados (status = 'dropped' sem evento em `drops`) com `dropped_on = NULL` e `created_at = NULL`.
+db.exec(`INSERT INTO drops (book_id, dropped_on, demo, created_at)
+  SELECT s.book_id, NULL, s.demo, NULL FROM shelf s
+  WHERE s.status = 'dropped'
+    AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id)`);
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
