@@ -12,6 +12,7 @@ process.env.ORELHA_NO_QUOTES = '1';
 const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
 const { parseCsv } = await import('../server/importers.js');
+const { upsertFromOl } = await import('../server/library.js');
 
 const MAC = '100.64.0.10';
 const IPHONE_V6 = 'fd7a:115c:a1e0::10';
@@ -305,4 +306,202 @@ test('na home, atualizar a página não troca os livros de lugar e a citação v
   assert.equal(quote.text, 'Citação publicada na fonte do livro.');
   assert.equal(quote.source.name, 'Wikiquote');
   assert.deepEqual((await call('GET', '/home')).json.quote, quote);
+});
+
+test('edição de ISBN, sinopse e gêneros atualiza estante e fica protegida da Open Library', async () => {
+  const genresRes = await call('GET', '/genres');
+  assert.equal(genresRes.status, 200);
+  assert.ok(genresRes.json.some((g) => g.id === 'scifi' && g.label === 'Ficção científica'));
+
+  assert.equal((await call('POST', '/books', { title: 'ISBN Ruim', isbn: '123' })).status, 400);
+
+  const created = await newBook('Livro Editável', {
+    isbn: '978-85-359-0277-8',
+    description: 'Sinopse inicial.',
+    subjects: ['Literatura brasileira', 'Sertão'],
+  });
+  assert.equal(created.isbn, '9788535902778');
+  assert.equal(created.cover, '/covers/isbn/9788535902778');
+
+  await call('PUT', `/books/${created.id}/shelf`, { status: 'read' });
+  let page = (await call('GET', `/books/${created.id}`)).json;
+  assert.equal(page.book.description, 'Sinopse inicial.');
+  assert.deepEqual(page.book.genres, ['brazilian']);
+  assert.deepEqual(page.book.other_subjects, ['Sertão']);
+
+  assert.equal((await call('PATCH', `/books/${created.id}`, { isbn: 'invalido' })).status, 400);
+
+  const updated = await call('PATCH', `/books/${created.id}`, {
+    isbn: '85-359-0277-X',
+    description: 'Sinopse revisada pelo leitor.',
+    subjects: ['Ficção científica', 'Mistério', 'Memória'],
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.json.isbn, '853590277X');
+
+  page = (await call('GET', `/books/${created.id}`)).json;
+  assert.equal(page.book.description, 'Sinopse revisada pelo leitor.');
+  assert.deepEqual(page.book.genres, ['scifi', 'mystery']);
+  assert.deepEqual(page.book.other_subjects, ['Memória']);
+
+  const [onShelf] = (await call('GET', '/shelf?status=read&q=Livro Editável')).json;
+  assert.deepEqual(onShelf.genres, ['scifi', 'mystery']);
+
+  // Livro vindo da Open Library editado pelo usuário não perde sinopse/gêneros ao buscar detalhes.
+  upsertFromOl({
+    ol_key: 'OL999999W',
+    title: 'Obra OL',
+    title_is_pt: 1,
+    original_title: null,
+    subtitle: null,
+    authors: ['Autora OL'],
+    year: 2020,
+    pages: 200,
+    isbn: null,
+    cover_id: null,
+    subjects: [],
+  });
+  await call('PATCH', '/books/OL999999W', { description: '', subjects: [] });
+  for (const [key, val] of [
+    ['https://openlibrary.org/works/OL999999W.json', { title: 'Obra OL', description: 'Texto da OL', subjects: ['Fantasy'], covers: [42] }],
+    ['https://openlibrary.org/works/OL999999W/ratings.json', { summary: { average: null, count: 0 } }],
+    ['https://openlibrary.org/works/OL999999W/bookshelves.json', { counts: {} }],
+  ]) {
+    db.prepare('INSERT INTO api_cache (key, value, expires_at) VALUES (?, ?, ?)').run(key, JSON.stringify(val), Date.now() + 86_400_000);
+  }
+  const olPage = (await call('GET', '/books/OL999999W')).json;
+  assert.equal(olPage.book.description, null);
+  assert.deepEqual(olPage.book.subjects, []);
+  assert.equal(olPage.book.cover, '/covers/id/42');
+});
+
+test('parseCsv detecta ponto-e-vírgula automaticamente', () => {
+  const rows = parseCsv('Título;Autor;Nota\r\n"A; B";Fulano;4,5\r\n');
+  assert.deepEqual(rows, [{ Título: 'A; B', Autor: 'Fulano', Nota: '4,5' }]);
+});
+
+test('importa CSV do Skoob (formato Goodreads com Bookshelves e formato em português) sem duplicar', async () => {
+  const skoobGr = `Title,Author,ISBN,ISBN13,My Rating,Number of Pages,Year Published,Date Read,Bookshelves,My Review
+Skoob Um,Marina Autora,,9788500000101,"4,5",280,2021,15/08/2024,"lido, favoritos",Muito bom
+Skoob Dois,Pedro Autor,,9788500000102,0,190,2022,,abandonei,
+Skoob Tres,Lia Autora,,9788500000103,0,310,2023,,quero-ler,
+`;
+  const first = (await call('POST', '/import', skoobGr)).json;
+  assert.equal(first.format, 'Skoob');
+  assert.equal(first.books_added, 3);
+  assert.equal(first.logs_added, 1);
+
+  const again = (await call('POST', '/import', skoobGr)).json;
+  assert.equal(again.books_added, 0);
+  assert.equal(again.logs_added, 0);
+
+  const [readBook] = (await call('GET', '/shelf?status=read&q=Skoob Um')).json;
+  assert.equal(readBook.rating, 9);
+  assert.equal(readBook.liked, true);
+  assert.equal(readBook.last_finished, '2024-08-15');
+  assert.equal((await call('GET', '/shelf?status=dropped&q=Skoob Dois')).json.length, 1);
+  assert.equal((await call('GET', '/shelf?status=want&q=Skoob Tres')).json.length, 1);
+
+  const skoobPt = `Título;Autor;ISBN;Páginas;Ano;Estante;Nota;Lido em;Resenha
+Skoob Quatro;Clara Autora;9788500000104;215;2018;Lido;5;03/11/2025;Adorei
+`;
+  const ptRes = (await call('POST', '/import', skoobPt)).json;
+  assert.equal(ptRes.format, 'Skoob');
+  assert.equal(ptRes.books_added, 1);
+  assert.equal(ptRes.logs_added, 1);
+  const [ptBook] = (await call('GET', '/shelf?status=read&q=Skoob Quatro')).json;
+  assert.equal(ptBook.rating, 10);
+  assert.equal(ptBook.last_finished, '2025-11-03');
+});
+
+test('reimporta o próprio CSV do Orelha e restaura backup JSON completo de forma idempotente', async () => {
+  const b1 = await newBook('Backup Um', {
+    isbn: '9788500000201',
+    description: 'Sinopse para backup.',
+    subjects: ['Literatura brasileira', 'Sertão'],
+    pages: 350,
+    year: 2019,
+  });
+  const b2 = await newBook('Backup Dois', { pages: 180 });
+  await call('POST', `/books/${b1.id}/logs`, {
+    rating: 9,
+    finished_on: '2025-07-10',
+    started_on: '2025-07-01',
+    review: 'Excelente leitura',
+    spoilers: true,
+    reread: true,
+    format: 'paper',
+    liked: true,
+  });
+  await call('POST', `/books/${b2.id}/progress`, { page: 45, on_day: '2025-07-12' });
+  await call('POST', `/books/${b1.id}/quotes`, { text: 'Frase marcante do backup.', page: 123 });
+  const list = (await call('POST', '/lists', { title: 'Lista do Backup', description: 'Top', ranked: true })).json;
+  await call('POST', `/lists/${list.id}/items`, { book_id: b2.id });
+  await call('POST', `/lists/${list.id}/items`, { book_id: b1.id });
+  await call('PUT', '/favorites/2', { book_id: b1.id });
+
+  const exportedJson = (await call('GET', '/export.json')).json;
+  const exportedCsv = (await call('GET', '/export.csv')).text;
+
+  // Limpa as tabelas para simular restauração num banco zerado.
+  db.exec(`
+    DELETE FROM favorites;
+    DELETE FROM list_items;
+    DELETE FROM lists;
+    DELETE FROM quotes;
+    DELETE FROM progress;
+    DELETE FROM logs;
+    DELETE FROM shelf;
+    DELETE FROM books;
+  `);
+
+  const restored = (await call('POST', '/import', JSON.stringify(exportedJson))).json;
+  assert.equal(restored.format, 'Orelha (JSON)');
+  assert.ok(restored.books_added >= 2);
+  assert.ok(restored.logs_added >= 1);
+  assert.ok(restored.quotes_added >= 1);
+  assert.ok(restored.lists_added >= 1);
+
+  const page1 = (await call('GET', `/books/${b1.id}`)).json;
+  assert.equal(page1.book.description, 'Sinopse para backup.');
+  assert.deepEqual(page1.book.genres, ['brazilian']);
+  assert.equal(page1.book.liked, true);
+  assert.equal(page1.logs[0].rating, 9);
+  assert.equal(page1.logs[0].spoilers, true);
+  assert.equal(page1.logs[0].reread, true);
+  assert.equal(page1.logs[0].format, 'paper');
+  assert.equal(page1.quotes[0].text, 'Frase marcante do backup.');
+  assert.equal(page1.quotes[0].page, 123);
+  assert.equal(page1.favorite_slot, 2);
+
+  const page2 = (await call('GET', `/books/${b2.id}`)).json;
+  assert.equal(page2.book.status, 'reading');
+  assert.equal(page2.book.current_page, 45);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM progress WHERE book_id = ?').get(b2.id).n, 1);
+
+  const lists = (await call('GET', '/lists')).json;
+  const restoredList = (await call('GET', `/lists/${lists.find((l) => l.title === 'Lista do Backup').id}`)).json;
+  assert.equal(restoredList.ranked, true);
+  assert.deepEqual(restoredList.books.map((b) => b.id), [b2.id, b1.id]);
+
+  // Repetir a importação do mesmo JSON não duplica nada.
+  const repeat = (await call('POST', '/import', JSON.stringify(exportedJson))).json;
+  assert.equal(repeat.books_added, 0);
+  assert.equal(repeat.logs_added, 0);
+  assert.equal(repeat.quotes_added, 0);
+  assert.equal(repeat.lists_added, 0);
+
+  // Reimportar o próprio CSV exportado também é reconhecido e idempotente.
+  db.exec(`DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  const csvRestored = (await call('POST', '/import', exportedCsv)).json;
+  assert.equal(csvRestored.format, 'Orelha (CSV)');
+  assert.ok(csvRestored.books_added >= 2);
+  assert.ok(csvRestored.logs_added >= 1);
+  const csvRepeat = (await call('POST', '/import', exportedCsv)).json;
+  assert.equal(csvRepeat.books_added, 0);
+  assert.equal(csvRepeat.logs_added, 0);
+
+  // Recusa JSON inválido ou de outro formato.
+  assert.equal((await call('POST', '/import', '{quebrado')).status, 400);
+  assert.equal((await call('POST', '/import', JSON.stringify({ app: 'outro', books: [] }))).status, 400);
 });

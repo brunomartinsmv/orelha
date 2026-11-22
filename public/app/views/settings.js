@@ -32,7 +32,14 @@ export function SettingsView() {
     const result = await act(() => api('/import', { method: 'POST', raw: bytes }));
     setImporting(false);
     if (result) {
-      toast(`${result.format}: ${plural(result.books_added, 'livro novo', 'livros novos')}, ${plural(result.logs_added, 'registro', 'registros')}. As capas chegam aos poucos.`);
+      const parts = [
+        plural(result.books_added, 'livro novo', 'livros novos'),
+        plural(result.logs_added, 'registro', 'registros'),
+        ...(result.quotes_added ? [plural(result.quotes_added, 'trecho', 'trechos')] : []),
+        ...(result.lists_added ? [plural(result.lists_added, 'lista', 'listas')] : []),
+      ];
+      const suffix = result.books_added > 0 && !result.format.includes('JSON') ? ' As capas chegam aos poucos.' : '';
+      toast(`${result.format}: ${parts.join(', ')}.${suffix}`);
     }
   };
 
@@ -58,9 +65,10 @@ export function SettingsView() {
 
       <div class="setting-block">
         <h2>Importar leituras</h2>
-        <p>Traga seu histórico em CSV do Goodreads ou do StoryGraph.</p>
-        <button class="btn" disabled=${importing} onClick=${() => fileRef.current.click()}>${importing ? 'Importando…' : 'Escolher arquivo CSV'}</button>
-        <input ref=${fileRef} type="file" accept=".csv,text/csv" hidden onChange=${importFile} />
+        <p>Traga seu histórico em CSV do Skoob, Goodreads ou StoryGraph, ou restaure um backup do Orelha (JSON ou CSV).</p>
+        <button class="btn" disabled=${importing} onClick=${() => fileRef.current.click()}>${importing ? 'Importando…' : 'Escolher arquivo'}</button>
+        <input ref=${fileRef} type="file" accept=".csv,.json,text/csv,application/json" hidden onChange=${importFile} />
+        <p class="muted" style="font-size:13px;margin:10px 0 0">No Skoob, exporte sua estante em CSV por uma extensão de navegador (como Skoob para Goodreads) e envie o arquivo aqui.</p>
       </div>
 
       <div class="setting-block">

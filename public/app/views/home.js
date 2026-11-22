@@ -130,7 +130,7 @@ export function HomeView() {
       <p>Comece pelo livro que ainda está na sua cabeça. Dá nota, escreve duas linhas. A estante cresce a partir daí.</p>
       <div class="btn-row">
         <a class="btn primary" href="/buscar"><${Icon.search} /> Buscar um livro</a>
-        <a class="btn" href="/ajustes">Importar do Goodreads</a>
+        <a class="btn" href="/ajustes">Importar leituras</a>
       </div>
     </div>`}
 

@@ -213,6 +213,8 @@ img { display: block; }
 
 .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 2px 16px; }
 .chips::-webkit-scrollbar { display: none; }
+.genre-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.genre-picker .chip { min-height: 32px; padding: 0 11px; font-size: 13px; }
 .chip { flex: none; min-height: 36px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); font-size: 14px; font-weight: 500; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; transition: background .15s, color .15s, border-color .15s; }
 .chip:hover { color: var(--ink); border-color: var(--ink-3); }
 .chip.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }

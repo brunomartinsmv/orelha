@@ -6,7 +6,7 @@ import { extname, join, normalize, sep } from 'node:path';
 import { COVERS_DIR, db, setSetting } from './db.js';
 import * as lib from './library.js';
 import { HttpError } from './library.js';
-import { importCsv } from './importers.js';
+import { importData } from './importers.js';
 import { USER_AGENT, VERSION } from './version.js';
 
 const PUBLIC_DIR = join(import.meta.dirname, '..', 'public');
@@ -71,6 +71,7 @@ export function createApp(config) {
 
   // O pid deixa os scripts de serviço confirmarem que quem responde é o processo que acabaram de subir.
   route('GET', '/api/health', () => ({ ok: true, version: VERSION, pid: process.pid }));
+  route('GET', '/api/genres', () => lib.listGenres());
   route('GET', '/api/search', ({ query }) => lib.search(query.get('q')));
   route('GET', '/api/home', () => lib.home());
   route('GET', '/api/discover', () => lib.discover());
@@ -112,7 +113,7 @@ export function createApp(config) {
     }
     return lib.profile();
   });
-  route('POST', '/api/import', ({ raw }) => importCsv(raw.toString('utf8')), { raw: MAX_CSV });
+  route('POST', '/api/import', ({ raw }) => importData(raw.toString('utf8')), { raw: MAX_CSV });
   route('POST', '/api/demo/clear', () => { lib.clearDemoData(); return { ok: true }; });
 
   route('GET', '/api/export.json', ({ res }) => {

@@ -1,13 +1,26 @@
 import { html, useEffect, useRef, useState } from '/vendor/htm-preact.js';
-import { act, api, authorLine, navigate, STATUS } from '../lib.js';
+import { act, api, authorLine, navigate, STATUS, useFetch } from '../lib.js';
 import { Cover, ErrorBox, Icon, Sheet, Stars } from '../ui.js';
+import { GenrePicker } from '../sheets.js';
 
 function ManualSheet({ initialTitle, onClose }) {
-  const [form, setForm] = useState({ title: initialTitle, authors: '', year: '', pages: '', isbn: '' });
+  const { data: allGenres } = useFetch('/genres');
+  const [form, setForm] = useState({ title: initialTitle, authors: '', year: '', pages: '', isbn: '', description: '' });
+  const [genres, setGenres] = useState([]);
+  const [otherSubjects, setOtherSubjects] = useState('');
+  const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const toggleGenre = (id) => setGenres((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const save = async (e) => {
     e.preventDefault();
-    const book = await act(() => api('/books', { method: 'POST', body: form }), 'Livro criado.');
+    const labelById = new Map((allGenres || []).map((g) => [g.id, g.label]));
+    const subjects = [
+      ...genres.map((id) => labelById.get(id)).filter(Boolean),
+      ...otherSubjects.split(/[,;]/).map((s) => s.trim()).filter(Boolean),
+    ];
+    setSaving(true);
+    const book = await act(() => api('/books', { method: 'POST', body: { ...form, subjects } }), 'Livro criado.');
+    setSaving(false);
     if (book) { onClose(); navigate(`/livro/${encodeURIComponent(book.id)}`); }
   };
   return html`<${Sheet} title="Adicionar à mão" onClose=${onClose}>
@@ -18,9 +31,13 @@ function ManualSheet({ initialTitle, onClose }) {
         <label class="field"><span>Páginas</span><input class="input" type="number" inputmode="numeric" min="1" value=${form.pages} onInput=${set('pages')} /></label>
         <label class="field"><span>Ano</span><input class="input" type="number" inputmode="numeric" min="0" value=${form.year} onInput=${set('year')} /></label>
       </div>
-      <label class="field"><span>ISBN (opcional)</span><input class="input" inputmode="numeric" value=${form.isbn} onInput=${set('isbn')} /></label>
-      <button class="btn primary block" style="margin-top:18px">Criar livro</button>
-      <p class="muted" style="font-size:13px;margin-top:10px;text-align:center">A capa você pode fotografar depois, na página do livro.</p>
+      <label class="field"><span>ISBN (opcional)</span><input class="input" placeholder="10 ou 13 dígitos" value=${form.isbn} onInput=${set('isbn')} /></label>
+      <label class="field"><span>Sinopse (opcional)</span><textarea class="input" rows="3" value=${form.description} onInput=${set('description')}></textarea></label>
+      <${GenrePicker} selected=${genres} onToggle=${toggleGenre} other=${otherSubjects} onOther=${setOtherSubjects} />
+      <p class="muted" style="font-size:13px;margin-top:12px;text-align:center">A capa você pode fotografar depois, na página do livro.</p>
+      <div class="sticky-save">
+        <button class="btn primary block" disabled=${saving}>${saving ? 'Criando…' : 'Criar livro'}</button>
+      </div>
     </form>
   <//>`;
 }

@@ -135,10 +135,15 @@ async function ensureDetails(id) {
   if (row.ol_key && !row.details_at) {
     const details = await ol.workDetails(row.ol_key).catch(() => null);
     if (details) {
-      db.prepare(`UPDATE books SET description = COALESCE(description, ?),
-                  subjects = CASE WHEN subjects = '[]' THEN ? ELSE subjects END,
-                  cover_id = COALESCE(cover_id, ?), details_at = datetime('now') WHERE id = ?`)
-        .run(details.description, JSON.stringify(details.subjects), details.cover_id, id);
+      if (row.user_edited) {
+        db.prepare(`UPDATE books SET cover_id = COALESCE(cover_id, ?), details_at = datetime('now') WHERE id = ?`)
+          .run(details.cover_id, id);
+      } else {
+        db.prepare(`UPDATE books SET description = COALESCE(description, ?),
+                    subjects = CASE WHEN subjects = '[]' THEN ? ELSE subjects END,
+                    cover_id = COALESCE(cover_id, ?), details_at = datetime('now') WHERE id = ?`)
+          .run(details.description, JSON.stringify(details.subjects), details.cover_id, id);
+      }
       row = getBookRow(id);
     }
   }
@@ -148,8 +153,15 @@ async function ensureDetails(id) {
 export async function bookPage(id) {
   const row = await ensureDetails(id);
   const community = row.ol_key ? await ol.communityData(row.ol_key).catch(() => null) : null;
+  const subjects = JSON.parse(row.subjects || '[]');
   return {
-    book: { ...presentBook(row), description: row.description, subjects: JSON.parse(row.subjects || '[]') },
+    book: {
+      ...presentBook(row),
+      description: row.description,
+      subjects,
+      genres: rec.genresOf(subjects),
+      other_subjects: rec.otherSubjectsOf(subjects),
+    },
     community,
     logs: db.prepare('SELECT * FROM logs WHERE book_id = ? ORDER BY COALESCE(finished_on, created_at) DESC, id DESC').all(id).map(presentLog),
     quotes: db.prepare('SELECT * FROM quotes WHERE book_id = ? ORDER BY COALESCE(page, 999999), id').all(id),
@@ -217,15 +229,43 @@ const asDate = (v) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v))) throw new HttpError(400, 'Data inválida.');
   return v;
 };
+const asIsbn = (v) => {
+  if (v === undefined || v === null || String(v).trim() === '') return null;
+  const compact = String(v).replace(/[-\s]/g, '').toUpperCase();
+  if (!/^(97[89]\d{10}|\d{9}[\dX])$/.test(compact)) throw new HttpError(400, 'ISBN inválido. Informe 10 ou 13 dígitos.');
+  return compact;
+};
+const asSubjects = (v) => {
+  if (v === undefined || v === null) return [];
+  const raw = Array.isArray(v) ? v : String(v).split(/[,;]/);
+  const seen = new Set();
+  const out = [];
+  for (const item of raw) {
+    const text = String(item ?? '').trim().slice(0, 40);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length === 16) break;
+  }
+  return out;
+};
+
+export function listGenres() {
+  return rec.GENRES.map(({ id, label }) => ({ id, label }));
+}
 
 export function createManualBook(body) {
   const title = clampText(body.title, 300);
   if (!title) throw new HttpError(400, 'O título é obrigatório.');
   const id = `m_${randomUUID().slice(0, 12)}`;
   const authors = String(body.authors || '').split(/[,;]/).map((a) => a.trim()).filter(Boolean);
-  db.prepare(`INSERT INTO books (id, title, title_is_pt, authors, year, pages, isbn, source, user_edited)
-              VALUES (?, ?, 1, ?, ?, ?, ?, 'manual', 1)`)
-    .run(id, title, JSON.stringify(authors), asInt(body.year), asInt(body.pages), clampText(body.isbn, 20));
+  const isbn = asIsbn(body.isbn);
+  const description = clampText(body.description, 10_000);
+  const subjects = asSubjects(body.subjects);
+  db.prepare(`INSERT INTO books (id, title, title_is_pt, authors, year, pages, isbn, cover_isbn, description, subjects, source, user_edited)
+              VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'manual', 1)`)
+    .run(id, title, JSON.stringify(authors), asInt(body.year), asInt(body.pages), isbn, isbn, description, JSON.stringify(subjects));
   return presentBook(getBookRow(id));
 }
 
@@ -241,11 +281,25 @@ export function updateBook(id, body) {
     db.prepare('UPDATE books SET title = ?, user_edited = 1 WHERE id = ?').run(title, id);
   }
   if (body.authors !== undefined) {
-    const authors = String(body.authors).split(/[,;]/).map((a) => a.trim()).filter(Boolean);
+    const authors = Array.isArray(body.authors)
+      ? body.authors.map((a) => String(a).trim()).filter(Boolean)
+      : String(body.authors).split(/[,;]/).map((a) => a.trim()).filter(Boolean);
     db.prepare('UPDATE books SET authors = ?, user_edited = 1 WHERE id = ?').run(JSON.stringify(authors), id);
   }
   if (body.pages !== undefined) db.prepare('UPDATE books SET pages = ?, user_edited = 1 WHERE id = ?').run(asInt(body.pages), id);
   if (body.year !== undefined) db.prepare('UPDATE books SET year = ?, user_edited = 1 WHERE id = ?').run(asInt(body.year), id);
+  if (body.isbn !== undefined) {
+    const isbn = asIsbn(body.isbn);
+    db.prepare(`UPDATE books SET isbn = ?,
+      cover_isbn = CASE WHEN cover_id IS NULL AND cover_file IS NULL THEN ? ELSE cover_isbn END,
+      user_edited = 1 WHERE id = ?`).run(isbn, isbn, id);
+  }
+  if (body.description !== undefined) {
+    db.prepare('UPDATE books SET description = ?, user_edited = 1 WHERE id = ?').run(clampText(body.description, 10_000), id);
+  }
+  if (body.subjects !== undefined) {
+    db.prepare('UPDATE books SET subjects = ?, user_edited = 1 WHERE id = ?').run(JSON.stringify(asSubjects(body.subjects)), id);
+  }
   return presentBook(getBookRow(id));
 }
 
