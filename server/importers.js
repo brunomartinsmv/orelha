@@ -513,6 +513,8 @@ export function importOrelhaJson(data) {
 
     const preexistingLogs = db.prepare('SELECT * FROM logs').all();
     const usedLogIds = new Set();
+    const preexistingDrops = db.prepare('SELECT * FROM drops').all();
+    const usedDropIds = new Set();
     const preexistingProgress = db.prepare('SELECT * FROM progress').all();
     const usedProgressIds = new Set();
     const preexistingQuotes = db.prepare('SELECT * FROM quotes').all();
@@ -632,15 +634,14 @@ export function importOrelhaJson(data) {
       const liked = s.liked ? 1 : 0;
       const currentPage = safeInt(s.current_page);
       const startedOn = normalizeDate(s.started_on);
-      const droppedOn = normalizeDate(s.dropped_on);
       const demo = s.demo ? 1 : 0;
       const updatedAt = safeTimestamp(s.updated_at);
       const cur = db.prepare('SELECT * FROM shelf WHERE book_id = ?').get(bookId);
       if (!cur) {
         const allowRunning = status === 'reading' || status === 'dropped';
-        db.prepare(`INSERT INTO shelf (book_id, status, liked, current_page, started_on, dropped_on, demo, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
-          .run(bookId, status, liked, allowRunning ? currentPage : null, allowRunning ? startedOn : null, status === 'dropped' ? droppedOn : null, demo, updatedAt);
+        db.prepare(`INSERT INTO shelf (book_id, status, liked, current_page, started_on, demo, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
+          .run(bookId, status, liked, allowRunning ? currentPage : null, allowRunning ? startedOn : null, demo, updatedAt);
       } else {
         const finalStatus = cur.status ?? status;
         const allowRunning = finalStatus === 'reading' || finalStatus === 'dropped';
@@ -648,10 +649,9 @@ export function importOrelhaJson(data) {
             status = ?,
             liked = MAX(liked, ?),
             current_page = CASE WHEN ? THEN COALESCE(current_page, ?) ELSE current_page END,
-            started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END,
-            dropped_on = CASE WHEN ? THEN COALESCE(dropped_on, ?) ELSE dropped_on END
+            started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
-          .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, finalStatus === 'dropped' ? 1 : 0, droppedOn, bookId);
+          .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, bookId);
       }
     }
 
@@ -692,6 +692,24 @@ export function importOrelhaJson(data) {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`)
         .run(bookId, finishedOn, startedOn, rating, review, spoilers, reread, format, safeKey, demo, createdAt);
       result.logs_added++;
+    }
+
+    for (const d of Array.isArray(data.drops) ? data.drops : []) {
+      const bookId = bookIdMap.get(safeBookId(d?.book_id));
+      const droppedOn = normalizeDate(d?.dropped_on);
+      if (!bookId || !droppedOn) { result.skipped++; continue; }
+      const demo = d.demo ? 1 : 0;
+      const createdAt = safeTimestamp(d.created_at);
+      const match = preexistingDrops.find((c) => !usedDropIds.has(c.id)
+        && c.book_id === bookId
+        && c.dropped_on === droppedOn
+        && (!createdAt || c.created_at === createdAt));
+      if (match) {
+        usedDropIds.add(match.id);
+      } else {
+        db.prepare(`INSERT INTO drops (book_id, dropped_on, demo, created_at)
+          VALUES (?, ?, ?, COALESCE(?, datetime('now')))`).run(bookId, droppedOn, demo, createdAt);
+      }
     }
 
     for (const p of Array.isArray(data.progress) ? data.progress : []) {

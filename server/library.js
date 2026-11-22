@@ -40,7 +40,6 @@ export function presentBook(row) {
       liked: !!row.liked,
       current_page: row.current_page,
       started_on: row.started_on,
-      dropped_on: row.dropped_on ?? null,
     } : {}),
     ...(row.my_rating !== undefined ? { rating: row.my_rating } : {}),
     ...(row.last_finished !== undefined ? { last_finished: row.last_finished } : {}),
@@ -49,7 +48,7 @@ export function presentBook(row) {
 
 // Colunas extras usadas em toda listagem: estado da estante + última nota.
 const BOOK_SELECT = `
-  SELECT b.*, s.status, s.liked, s.current_page, s.started_on, s.dropped_on,
+  SELECT b.*, s.status, s.liked, s.current_page, s.started_on,
     (SELECT rating FROM logs l WHERE l.book_id = b.id AND l.rating IS NOT NULL
       ORDER BY COALESCE(l.finished_on, l.created_at) DESC, l.id DESC LIMIT 1) AS my_rating,
     (SELECT MAX(finished_on) FROM logs l WHERE l.book_id = b.id) AS last_finished
@@ -320,19 +319,16 @@ export function updateShelf(bookId, body) {
   const explicitDroppedOn = body.dropped_on !== undefined ? asDate(body.dropped_on) : undefined;
   return transaction(() => {
     ensureShelf(bookId);
-    const prev = db.prepare('SELECT status, dropped_on FROM shelf WHERE book_id = ?').get(bookId);
+    const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
     if (body.status !== undefined) {
-      // Só grava a data ao entrar em `dropped`; repetir o mesmo status não inventa data para registros antigos.
-      const nextDroppedOn = body.status === 'dropped'
-        ? (explicitDroppedOn !== undefined ? explicitDroppedOn : (prev.status === 'dropped' ? prev.dropped_on : today()))
-        : null;
       db.prepare(`UPDATE shelf SET status = ?, updated_at = datetime('now'),
         started_on = CASE WHEN ? = 'reading' THEN COALESCE(started_on, ?) WHEN ? IN ('want') OR ? IS NULL THEN NULL ELSE started_on END,
-        current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END,
-        dropped_on = ?
-        WHERE book_id = ?`).run(body.status, body.status, today(), body.status, body.status, body.status, nextDroppedOn, bookId);
-    } else if (explicitDroppedOn !== undefined) {
-      db.prepare(`UPDATE shelf SET dropped_on = CASE WHEN status = 'dropped' THEN ? ELSE NULL END WHERE book_id = ?`).run(explicitDroppedOn, bookId);
+        current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END
+        WHERE book_id = ?`).run(body.status, body.status, today(), body.status, body.status, body.status, bookId);
+      // Registra o evento apenas ao entrar em `dropped`; repetir o mesmo status não duplica nem data legados.
+      if (body.status === 'dropped' && prev.status !== 'dropped') {
+        db.prepare('INSERT INTO drops (book_id, dropped_on) VALUES (?, ?)').run(bookId, explicitDroppedOn || today());
+      }
     }
     if (body.liked !== undefined) {
       db.prepare(`UPDATE shelf SET liked = ?, updated_at = datetime('now') WHERE book_id = ?`).run(body.liked ? 1 : 0, bookId);
@@ -352,7 +348,7 @@ export function addProgress(bookId, body) {
   const day = asDate(body.on_day) || today();
   return transaction(() => {
     ensureShelf(bookId);
-    db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), dropped_on = NULL, updated_at = datetime('now') WHERE book_id = ?`)
+    db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), updated_at = datetime('now') WHERE book_id = ?`)
       .run(page, day, bookId);
     db.prepare('INSERT INTO progress (book_id, page, on_day) VALUES (?, ?, ?)').run(bookId, page, day);
     return presentBook(getBookRow(bookId));
@@ -405,7 +401,7 @@ export function createLog(bookId, body) {
     const { lastInsertRowid } = db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(bookId, f.finished_on, started, f.rating, f.review, f.spoilers, f.reread, f.format);
-    db.prepare(`UPDATE shelf SET status = 'read', current_page = NULL, started_on = NULL, dropped_on = NULL, liked = COALESCE(?, liked), updated_at = datetime('now') WHERE book_id = ?`)
+    db.prepare(`UPDATE shelf SET status = 'read', current_page = NULL, started_on = NULL, liked = COALESCE(?, liked), updated_at = datetime('now') WHERE book_id = ?`)
       .run(body.liked === undefined ? null : (body.liked ? 1 : 0), bookId);
     return presentLog(db.prepare('SELECT * FROM logs WHERE id = ?').get(lastInsertRowid));
   });
@@ -656,12 +652,16 @@ export function stats({ year }) {
   const years = db.prepare(`SELECT DISTINCT y FROM (
       SELECT substr(finished_on, 1, 4) AS y FROM logs WHERE finished_on IS NOT NULL
       UNION
-      SELECT substr(dropped_on, 1, 4) AS y FROM shelf WHERE status = 'dropped' AND dropped_on IS NOT NULL
+      SELECT substr(dropped_on, 1, 4) AS y FROM drops
     ) ORDER BY y DESC`).all().map((r) => Number(r.y));
 
+  // Em "Sempre", inclui também abandonos legados (status = 'dropped' sem evento datado em `drops`).
   const dropped = allTime
-    ? db.prepare(`SELECT COUNT(*) AS n FROM shelf WHERE status = 'dropped'`).get().n
-    : db.prepare(`SELECT COUNT(*) AS n FROM shelf WHERE status = 'dropped' AND substr(dropped_on, 1, 4) = ?`).get(yearStr).n;
+    ? db.prepare(`SELECT
+        (SELECT COUNT(*) FROM drops) +
+        (SELECT COUNT(*) FROM shelf s WHERE s.status = 'dropped' AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id))
+      AS n`).get().n
+    : db.prepare(`SELECT COUNT(*) AS n FROM drops WHERE substr(dropped_on, 1, 4) = ?`).get(yearStr).n;
 
   const ratings = Array(10).fill(0);
   const months = Array.from({ length: 12 }, () => ({ books: 0, pages: 0 }));
@@ -680,7 +680,10 @@ export function stats({ year }) {
       ratings[r.rating - 1]++;
       ratingSum += r.rating;
       rated++;
-      periodRatings.set(r.book_id, { rating: r.rating, finished_on: r.finished_on });
+      const prev = periodRatings.get(r.book_id);
+      if (!prev || r.rating > prev.rating || (r.rating === prev.rating && r.finished_on >= prev.finished_on)) {
+        periodRatings.set(r.book_id, { rating: r.rating, finished_on: r.finished_on });
+      }
     }
     if (r.reread) rereads++;
     const m = months[Number(r.finished_on.slice(5, 7)) - 1];
@@ -770,9 +773,11 @@ export function exportAll() {
     books: q(`SELECT b.* FROM books b WHERE
       EXISTS (SELECT 1 FROM shelf s WHERE s.book_id = b.id) OR EXISTS (SELECT 1 FROM logs l WHERE l.book_id = b.id)
       OR EXISTS (SELECT 1 FROM list_items i WHERE i.book_id = b.id) OR EXISTS (SELECT 1 FROM quotes c WHERE c.book_id = b.id)
-      OR EXISTS (SELECT 1 FROM favorites f WHERE f.book_id = b.id) OR EXISTS (SELECT 1 FROM progress p WHERE p.book_id = b.id)`),
+      OR EXISTS (SELECT 1 FROM favorites f WHERE f.book_id = b.id) OR EXISTS (SELECT 1 FROM progress p WHERE p.book_id = b.id)
+      OR EXISTS (SELECT 1 FROM drops d WHERE d.book_id = b.id)`),
     shelf: q('SELECT * FROM shelf'),
     logs: q('SELECT * FROM logs'),
+    drops: q('SELECT * FROM drops'),
     progress: q('SELECT * FROM progress'),
     quotes: q('SELECT * FROM quotes'),
     lists: q('SELECT * FROM lists'),
@@ -818,6 +823,7 @@ export function clearDemoData() {
       DELETE FROM lists WHERE demo = 1;
       DELETE FROM quotes WHERE demo = 1;
       DELETE FROM progress WHERE demo = 1;
+      DELETE FROM drops WHERE demo = 1;
       DELETE FROM logs WHERE demo = 1;
       DELETE FROM shelf WHERE demo = 1 AND NOT EXISTS (SELECT 1 FROM logs l WHERE l.book_id = shelf.book_id);
       UPDATE shelf SET demo = 0;

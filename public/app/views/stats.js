@@ -168,10 +168,11 @@ function YearRecap({ data, onBack }) {
   }
   if (topFormat) {
     const pct = Math.round((topFormat.books / totalFormatted) * 100);
+    const pctLabel = totalFormatted < data.books ? `${pct}% dos registros com formato` : `${pct}%`;
     highlights.push({
       kicker: 'Formato principal',
       title: topFormat.label,
-      meta: `${plural(topFormat.books, 'livro', 'livros')} (${pct}%)`,
+      meta: `${plural(topFormat.books, 'livro', 'livros')} (${pctLabel})`,
     });
   }
 
@@ -238,10 +239,26 @@ function YearRecap({ data, onBack }) {
   </div>`;
 }
 
+function statsUrl(year, recap) {
+  const params = new URLSearchParams();
+  if (String(year) !== String(new Date().getFullYear())) params.set('ano', String(year));
+  if (recap && year !== 'all') params.set('modo', 'retrospectiva');
+  const qs = params.toString();
+  return qs ? `/numeros?${qs}` : '/numeros';
+}
+
 export function StatsView({ search }) {
   const [year, setYear] = useState(() => search.get('ano') || new Date().getFullYear());
   const [metric, setMetric] = useState('books');
   const [recap, setRecap] = useState(() => search.get('modo') === 'retrospectiva');
+  const searchKey = search.toString();
+  useEffect(() => {
+    const nextYear = search.get('ano') || new Date().getFullYear();
+    const nextRecap = nextYear !== 'all' && search.get('modo') === 'retrospectiva';
+    setYear(nextYear);
+    setRecap(nextRecap);
+  }, [searchKey]);
+
   const { data, error } = useFetch(`/stats?year=${year}`);
   if (error && !data) return html`<main class="page"><${ErrorBox} error=${error} /></main>`;
   if (!data) return html`<main class="page"><div class="skel" style="height:200px;margin-top:40px"></div></main>`;
@@ -249,10 +266,13 @@ export function StatsView({ search }) {
   const allTime = data.year === 'all';
   const canRecap = !allTime && data.books > 0;
   const inRecap = recap && canRecap;
-  const selectYear = (next) => {
-    setYear(next);
-    if (next === 'all') setRecap(false);
+  const updateView = (nextYear, nextRecap) => {
+    const allowRecap = nextYear !== 'all' && !!nextRecap;
+    setYear(nextYear);
+    setRecap(allowRecap);
+    history.replaceState(null, '', statsUrl(nextYear, allowRecap));
   };
+  const selectYear = (next) => updateView(next, next === 'all' ? false : recap);
 
   const chips = [...new Set([new Date().getFullYear(), ...data.years])].sort((a, b) => b - a);
   const hasPages = data.pages > 0;
@@ -280,6 +300,7 @@ export function StatsView({ search }) {
     <button type="button" class=${activeMetric === 'pages' ? 'on' : ''} aria-pressed=${activeMetric === 'pages'} onClick=${() => setMetric('pages')}>Páginas</button>
   </div>`;
 
+  const hasRatings = data.ratings.some((n) => n > 0);
   const ratingItems = data.ratings.map((count, i) => ({
     label: i % 2 ? String((i + 1) / 2) : '',
     value: count,
@@ -289,7 +310,7 @@ export function StatsView({ search }) {
   const maxPages = Math.max(1, ...data.stack.map((b) => b.pages));
 
   return html`<main class="page">
-    <${PageHeader} title="Números" back=${true} right=${canRecap && html`<button type="button" class=${`btn small ${inRecap ? '' : 'recap-btn'}`} onClick=${() => setRecap(!inRecap)}>
+    <${PageHeader} title="Números" back=${true} right=${canRecap && html`<button type="button" class=${`btn small ${inRecap ? '' : 'recap-btn'}`} onClick=${() => updateView(data.year, !inRecap)}>
       ${inRecap ? 'Ver números' : 'Retrospectiva'}
     </button>`} />
     <div class="chips" style="margin-top:12px" role="group" aria-label="Período">
@@ -305,7 +326,7 @@ export function StatsView({ search }) {
         </div>
         ${data.year === data.goal.year && html`<div style="margin-top:16px"><${GoalLine} goal=${data.goal} /></div>`}`
       : inRecap
-        ? html`<${YearRecap} data=${data} onBack=${() => setRecap(false)} />`
+        ? html`<${YearRecap} data=${data} onBack=${() => updateView(data.year, false)} />`
         : html`
           <section class=${`stats-hero ${data.stack.length > 0 ? 'with-pile' : ''}`}>
             <div>
@@ -329,7 +350,7 @@ export function StatsView({ search }) {
 
           <div class="stats-cols">
             <${BarChart} title=${timelineTitle} items=${timeline} hint="Toque numa barra para ver o valor." right=${timelineToggle} yAxis=${true} />
-            <${BarChart} title="Como você dá nota" items=${ratingItems} hint="Da meia estrela às cinco." />
+            ${hasRatings && html`<${BarChart} title="Como você dá nota" items=${ratingItems} hint="Da meia estrela às cinco." />`}
 
             ${data.genres.length > 0 && html`<${GenreList} key=${data.year} genres=${data.genres} />`}
             ${data.formats.length > 0 && html`<${FormatBreakdown} formats=${data.formats} totalBooks=${data.books} />`}

@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS shelf (
   liked INTEGER NOT NULL DEFAULT 0,
   current_page INTEGER,
   started_on TEXT,
-  dropped_on TEXT,
   demo INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -108,6 +107,16 @@ CREATE TABLE IF NOT EXISTS favorites (
 
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 
+CREATE TABLE IF NOT EXISTS drops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  dropped_on TEXT NOT NULL,
+  demo INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS drops_book ON drops(book_id);
+CREATE INDEX IF NOT EXISTS drops_date ON drops(dropped_on);
+
 CREATE TABLE IF NOT EXISTS api_cache (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -115,12 +124,14 @@ CREATE TABLE IF NOT EXISTS api_cache (
 );
 `);
 
-// Migração leve para bancos criados antes de `dropped_on`: preserva abandonos antigos sem inventar data.
+// Migra eventuais datas gravadas em `shelf.dropped_on` sem duplicar eventos já existentes.
 const shelfColumns = db.prepare('PRAGMA table_info(shelf)').all().map((c) => c.name);
-if (!shelfColumns.includes('dropped_on')) {
-  db.exec('ALTER TABLE shelf ADD COLUMN dropped_on TEXT');
+if (shelfColumns.includes('dropped_on')) {
+  db.exec(`INSERT INTO drops (book_id, dropped_on, demo)
+    SELECT s.book_id, s.dropped_on, s.demo FROM shelf s
+    WHERE s.dropped_on IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id AND d.dropped_on = s.dropped_on)`);
 }
-db.exec('CREATE INDEX IF NOT EXISTS shelf_dropped ON shelf(dropped_on)');
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
