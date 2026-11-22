@@ -172,6 +172,12 @@ function scheduleRetry(state = sync.getState()) {
   }, delay);
 }
 
+// Outra aba mexeu na fila: recarrega os itens e os dados, para que uma confirmação feita lá
+// não faça esta aba voltar a mostrar a versão antiga (e gerar conflito falso na próxima edição).
+function refreshFromOtherTab() {
+  sync.reloadFromStore().catch(() => {}).finally(() => invalidate());
+}
+
 export async function initSync() {
   if (syncInitialized) return sync.getState();
   syncInitialized = true;
@@ -180,12 +186,12 @@ export async function initSync() {
     try {
       syncChannel = new BroadcastChannel('orelha-sync');
       syncChannel.addEventListener('message', (event) => {
-        if (event.data?.source !== tabId) sync.reloadFromStore().catch(() => {});
+        if (event.data?.source !== tabId) refreshFromOtherTab();
       });
     } catch { syncChannel = null; }
   }
   window.addEventListener('storage', (event) => {
-    if (event.key === PING_KEY) sync.reloadFromStore().catch(() => {});
+    if (event.key === PING_KEY) refreshFromOtherTab();
   });
 
   sync.subscribe((state) => {
@@ -265,7 +271,7 @@ export function queueShelfStatus(book, status) {
   return sync.enqueue({
     kind: 'shelf',
     book,
-    payload: { status, ...(status === 'reading' ? { on_day: localDate() } : {}) },
+    payload: { status, on_day: localDate() },
     expected: { status: book.status ?? null, current_page: book.current_page ?? null },
     waitMs: fastWait(),
   });

@@ -1270,3 +1270,19 @@ test('expected detecta conflito entre aparelhos em progresso e status', async ()
   assert.equal(matchedShelf.status, 200);
   assert.equal(matchedShelf.json.status, 'dropped');
 });
+
+test('abandono sincronizado da fila offline usa on_day como data, e dropped_on explícito prevalece', async () => {
+  const queued = await newBook('Abandono Offline');
+  const res = await call('PUT', `/books/${queued.id}/shelf`, {
+    status: 'dropped',
+    on_day: '2025-12-31',
+    op_id: 'op-drop-offline',
+    expected: { status: null, current_page: null },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(db.prepare('SELECT dropped_on FROM drops WHERE book_id = ?').get(queued.id).dropped_on, '2025-12-31');
+
+  const explicit = await newBook('Abandono Com Data');
+  await call('PUT', `/books/${explicit.id}/shelf`, { status: 'dropped', on_day: '2026-01-02', dropped_on: '2025-06-01' });
+  assert.equal(db.prepare('SELECT dropped_on FROM drops WHERE book_id = ?').get(explicit.id).dropped_on, '2025-06-01');
+});
