@@ -22,7 +22,7 @@ Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no 
 - **Coleções e sublinhados:** seleção dos seus **4 livros favoritos**, listas personalizadas (comuns ou ranqueadas) e caderno de trechos guardados com número de página.
 - **Números da leitura:** estatísticas por ano ou de todo o histórico, distribuição de notas, autores mais lidos, décadas de publicação, extremos de tamanho e **A pilha** (altura física equivalente em papel).
 - **Descoberta e epígrafes:** recomendações em português baseadas no seu perfil de leitura via [Open Library](https://openlibrary.org) (com fallback na [BrasilAPI](https://brasilapi.com.br) para ISBNs brasileiros) e citações diárias vindas do [Wikiquote em português](https://pt.wikiquote.org).
-- **Portabilidade total:** importação idempotente de históricos em CSV do **Goodreads** e do **StoryGraph** (com busca gradual de capas em segundo plano) e exportação completa em CSV ou JSON.
+- **Portabilidade total:** importação idempotente de históricos em CSV do **Skoob**, **Goodreads**, **StoryGraph** e do próprio Orelha (com busca gradual de capas em segundo plano), exportação completa em CSV ou JSON e restauração de backups JSON pela interface.
 - **PWA e modo offline:** instalável na Tela de Início do iOS/Android, com tema claro/escuro automático ou manual e cache via Service Worker para consulta mesmo com o servidor desligado.
 
 ---

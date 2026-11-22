@@ -1,7 +1,7 @@
 import { html, useRef, useState } from '/vendor/htm-preact.js';
 import { act, api, authorLine, formatDate, navigate, num, ratingText, useBookTone, useFetch } from '../lib.js';
 import { Cover, ErrorBox, Icon, Rail, Sheet, Stars } from '../ui.js';
-import { ListPickerSheet, LogSheet, ProgressSheet, QuoteSheet } from '../sheets.js';
+import { ListPickerSheet, LogSheet, ProgressSheet, QuoteSheet, GenrePicker } from '../sheets.js';
 
 const FORMAT_LABEL = { paper: 'papel', ebook: 'e-book', audio: 'áudio' };
 
@@ -48,8 +48,23 @@ function About({ book }) {
 }
 
 function EditSheet({ book, onClose }) {
-  const [form, setForm] = useState({ title: book.title, authors: book.authors.join(', '), pages: book.pages ?? '', year: book.year ?? '' });
+  const { data: allGenres } = useFetch('/genres');
+  const initialForm = {
+    title: book.title,
+    authors: book.authors.join(', '),
+    pages: book.pages ?? '',
+    year: book.year ?? '',
+    isbn: book.isbn ?? '',
+    description: book.description ?? '',
+  };
+  const initialGenres = book.genres || [];
+  const initialOther = (book.other_subjects || []).join(', ');
+  const [form, setForm] = useState(initialForm);
+  const [genres, setGenres] = useState(() => initialGenres);
+  const [otherSubjects, setOtherSubjects] = useState(initialOther);
+  const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const toggleGenre = (id) => setGenres((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const fileRef = useRef(null);
   const upload = async (e) => {
     const file = e.target.files?.[0];
@@ -60,7 +75,40 @@ function EditSheet({ book, onClose }) {
   };
   const save = async (e) => {
     e.preventDefault();
-    const ok = await act(() => api(`/books/${encodeURIComponent(book.id)}`, { method: 'PATCH', body: form }), 'Livro atualizado.');
+    const body = {};
+    for (const k of ['title', 'authors', 'pages', 'year', 'isbn', 'description']) {
+      if (String(form[k]) !== String(initialForm[k])) body[k] = form[k];
+    }
+    const genresChanged = genres.length !== initialGenres.length || genres.some((g) => !initialGenres.includes(g));
+    const otherChanged = otherSubjects !== initialOther;
+    if (genresChanged || otherChanged) {
+      const selectedSet = new Set(genres);
+      const removedSet = new Set(initialGenres.filter((g) => !selectedSet.has(g)));
+      const origSubjects = book.subjects || [];
+      const origMatches = book.subject_genres || [];
+      // Preserva as etiquetas originais dos gêneros mantidos (ex.: múltiplas etiquetas da OL).
+      const keptGenreTerms = [];
+      const covered = new Set();
+      origSubjects.forEach((term, i) => {
+        const ids = origMatches[i] || [];
+        if (!ids.length) return;
+        if (ids.some((id) => removedSet.has(id))) return;
+        if (ids.some((id) => selectedSet.has(id))) {
+          keptGenreTerms.push(term);
+          ids.forEach((id) => covered.add(id));
+        }
+      });
+      const labelById = new Map((allGenres || []).map((g) => [g.id, g.label]));
+      const addedGenreTerms = genres.filter((id) => !covered.has(id)).map((id) => labelById.get(id)).filter(Boolean);
+      const extras = otherChanged
+        ? otherSubjects.split(/[,;]/).map((s) => s.trim()).filter(Boolean)
+        : (book.other_subjects || []);
+      body.subjects = [...keptGenreTerms, ...addedGenreTerms, ...extras];
+    }
+    if (!Object.keys(body).length) { onClose(); return; }
+    setSaving(true);
+    const ok = await act(() => api(`/books/${encodeURIComponent(book.id)}`, { method: 'PATCH', body }), 'Livro atualizado.');
+    setSaving(false);
     if (ok) onClose();
   };
   return html`<${Sheet} title="Ajustar livro" onClose=${onClose}>
@@ -73,7 +121,12 @@ function EditSheet({ book, onClose }) {
         <label class="field"><span>Páginas</span><input class="input" type="number" inputmode="numeric" min="1" value=${form.pages} onInput=${set('pages')} /></label>
         <label class="field"><span>Ano</span><input class="input" type="number" inputmode="numeric" min="0" value=${form.year} onInput=${set('year')} /></label>
       </div>
-      <button class="btn primary block" style="margin-top:18px">Salvar</button>
+      <label class="field"><span>ISBN</span><input class="input" placeholder="10 ou 13 dígitos" value=${form.isbn} onInput=${set('isbn')} /></label>
+      <label class="field"><span>Sinopse</span><textarea class="input" rows="4" value=${form.description} onInput=${set('description')}></textarea></label>
+      <${GenrePicker} genres=${allGenres} selected=${genres} onToggle=${toggleGenre} other=${otherSubjects} onOther=${setOtherSubjects} />
+      <div class="sticky-save">
+        <button class="btn primary block" disabled=${saving}>${saving ? 'Salvando…' : 'Salvar'}</button>
+      </div>
     </form>
   <//>`;
 }
@@ -154,7 +207,7 @@ function BookLoaded({ data, sheet, setSheet }) {
           ${book.subtitle && html`<p class="book-sub">${book.subtitle}</p>`}
           ${book.original_title && html`<p class="book-sub">${book.original_title}</p>`}
           <p class="book-author">${authorLine(book)}</p>
-          <p class="book-meta">${[book.year, book.pages ? `${num(book.pages)} páginas` : null].filter(Boolean).join(' · ')}</p>
+          <p class="book-meta">${[book.year, book.pages ? `${num(book.pages)} páginas` : null, book.isbn ? `ISBN ${book.isbn}` : null].filter(Boolean).join(' · ')}</p>
           ${book.rating && html`<div class="my-rating"><${Stars} value=${book.rating} size=${20} /><span class="muted" style="font-size:14px">${ratingText(book.rating)}, sua nota</span></div>`}
 
           <div class="book-actions">

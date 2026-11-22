@@ -135,9 +135,13 @@ async function ensureDetails(id) {
   if (row.ol_key && !row.details_at) {
     const details = await ol.workDetails(row.ol_key).catch(() => null);
     if (details) {
-      db.prepare(`UPDATE books SET description = COALESCE(description, ?),
-                  subjects = CASE WHEN subjects = '[]' THEN ? ELSE subjects END,
-                  cover_id = COALESCE(cover_id, ?), details_at = datetime('now') WHERE id = ?`)
+      // Condiciona no SQL ao valor atual de user_edited: evita race se o leitor editou durante o fetch.
+      db.prepare(`UPDATE books SET
+          description = CASE WHEN user_edited = 0 THEN COALESCE(description, ?) ELSE description END,
+          subjects = CASE WHEN user_edited = 0 AND subjects = '[]' THEN ? ELSE subjects END,
+          cover_id = COALESCE(cover_id, ?),
+          details_at = datetime('now')
+        WHERE id = ?`)
         .run(details.description, JSON.stringify(details.subjects), details.cover_id, id);
       row = getBookRow(id);
     }
@@ -148,8 +152,16 @@ async function ensureDetails(id) {
 export async function bookPage(id) {
   const row = await ensureDetails(id);
   const community = row.ol_key ? await ol.communityData(row.ol_key).catch(() => null) : null;
+  const subjects = JSON.parse(row.subjects || '[]');
   return {
-    book: { ...presentBook(row), description: row.description, subjects: JSON.parse(row.subjects || '[]') },
+    book: {
+      ...presentBook(row),
+      description: row.description,
+      subjects,
+      genres: rec.genresOf(subjects),
+      subject_genres: subjects.map((s) => rec.genresOf([s])),
+      other_subjects: rec.otherSubjectsOf(subjects),
+    },
     community,
     logs: db.prepare('SELECT * FROM logs WHERE book_id = ? ORDER BY COALESCE(finished_on, created_at) DESC, id DESC').all(id).map(presentLog),
     quotes: db.prepare('SELECT * FROM quotes WHERE book_id = ? ORDER BY COALESCE(page, 999999), id').all(id),
@@ -217,36 +229,80 @@ const asDate = (v) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v))) throw new HttpError(400, 'Data inválida.');
   return v;
 };
+const asIsbn = (v) => {
+  if (v === undefined || v === null || String(v).trim() === '') return null;
+  const compact = String(v).replace(/[-\s]/g, '').toUpperCase();
+  if (!/^(97[89]\d{10}|\d{9}[\dX])$/.test(compact)) throw new HttpError(400, 'ISBN inválido. Informe 10 ou 13 dígitos.');
+  return compact;
+};
+const asSubjects = (v) => {
+  if (v === undefined || v === null) return [];
+  const raw = Array.isArray(v) ? v : String(v).split(/[,;]/);
+  const seen = new Set();
+  const out = [];
+  for (const item of raw) {
+    const text = String(item ?? '').trim().slice(0, 60);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length === 24) break;
+  }
+  return out;
+};
+
+export function listGenres() {
+  return rec.GENRES.map(({ id, label }) => ({ id, label }));
+}
 
 export function createManualBook(body) {
   const title = clampText(body.title, 300);
   if (!title) throw new HttpError(400, 'O título é obrigatório.');
   const id = `m_${randomUUID().slice(0, 12)}`;
   const authors = String(body.authors || '').split(/[,;]/).map((a) => a.trim()).filter(Boolean);
-  db.prepare(`INSERT INTO books (id, title, title_is_pt, authors, year, pages, isbn, source, user_edited)
-              VALUES (?, ?, 1, ?, ?, ?, ?, 'manual', 1)`)
-    .run(id, title, JSON.stringify(authors), asInt(body.year), asInt(body.pages), clampText(body.isbn, 20));
+  const isbn = asIsbn(body.isbn);
+  const description = clampText(body.description, 10_000);
+  const subjects = asSubjects(body.subjects);
+  db.prepare(`INSERT INTO books (id, title, title_is_pt, authors, year, pages, isbn, cover_isbn, description, subjects, source, user_edited)
+              VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'manual', 1)`)
+    .run(id, title, JSON.stringify(authors), asInt(body.year), asInt(body.pages), isbn, isbn, description, JSON.stringify(subjects));
   return presentBook(getBookRow(id));
 }
 
 export function updateBook(id, body) {
-  requireBook(id);
-  if (body.color !== undefined) {
-    if (!/^#[0-9a-f]{6}$/i.test(body.color)) throw new HttpError(400, 'Cor inválida.');
-    db.prepare('UPDATE books SET color = ? WHERE id = ?').run(body.color, id);
-  }
-  if (body.title !== undefined) {
-    const title = clampText(body.title, 300);
-    if (!title) throw new HttpError(400, 'O título é obrigatório.');
-    db.prepare('UPDATE books SET title = ?, user_edited = 1 WHERE id = ?').run(title, id);
-  }
-  if (body.authors !== undefined) {
-    const authors = String(body.authors).split(/[,;]/).map((a) => a.trim()).filter(Boolean);
-    db.prepare('UPDATE books SET authors = ?, user_edited = 1 WHERE id = ?').run(JSON.stringify(authors), id);
-  }
-  if (body.pages !== undefined) db.prepare('UPDATE books SET pages = ?, user_edited = 1 WHERE id = ?').run(asInt(body.pages), id);
-  if (body.year !== undefined) db.prepare('UPDATE books SET year = ?, user_edited = 1 WHERE id = ?').run(asInt(body.year), id);
-  return presentBook(getBookRow(id));
+  const existing = requireBook(id);
+  const color = body.color !== undefined ? body.color : undefined;
+  if (color !== undefined && !/^#[0-9a-f]{6}$/i.test(color)) throw new HttpError(400, 'Cor inválida.');
+  const title = body.title !== undefined ? clampText(body.title, 300) : undefined;
+  if (body.title !== undefined && !title) throw new HttpError(400, 'O título é obrigatório.');
+  const authors = body.authors !== undefined
+    ? (Array.isArray(body.authors)
+      ? body.authors.map((a) => String(a).trim()).filter(Boolean)
+      : String(body.authors).split(/[,;]/).map((a) => a.trim()).filter(Boolean))
+    : undefined;
+  const pages = body.pages !== undefined ? asInt(body.pages) : undefined;
+  const year = body.year !== undefined ? asInt(body.year) : undefined;
+  const isbn = body.isbn !== undefined ? asIsbn(body.isbn) : undefined;
+  const description = body.description !== undefined ? clampText(body.description, 10_000) : undefined;
+  const subjects = body.subjects !== undefined ? asSubjects(body.subjects) : undefined;
+
+  return transaction(() => {
+    if (color !== undefined) db.prepare('UPDATE books SET color = ? WHERE id = ?').run(color, id);
+    if (title !== undefined) db.prepare('UPDATE books SET title = ?, user_edited = 1 WHERE id = ?').run(title, id);
+    if (authors !== undefined) db.prepare('UPDATE books SET authors = ?, user_edited = 1 WHERE id = ?').run(JSON.stringify(authors), id);
+    if (pages !== undefined) db.prepare('UPDATE books SET pages = ?, user_edited = 1 WHERE id = ?').run(pages, id);
+    if (year !== undefined) db.prepare('UPDATE books SET year = ?, user_edited = 1 WHERE id = ?').run(year, id);
+    if (isbn !== undefined) {
+      const resetColor = !existing.cover_id && !existing.cover_file && existing.cover_isbn !== isbn;
+      db.prepare(`UPDATE books SET isbn = ?,
+        cover_isbn = CASE WHEN cover_id IS NULL AND cover_file IS NULL THEN ? ELSE cover_isbn END,
+        color = CASE WHEN ? THEN NULL ELSE color END,
+        user_edited = 1 WHERE id = ?`).run(isbn, isbn, resetColor ? 1 : 0, id);
+    }
+    if (description !== undefined) db.prepare('UPDATE books SET description = ?, user_edited = 1 WHERE id = ?').run(description, id);
+    if (subjects !== undefined) db.prepare('UPDATE books SET subjects = ?, user_edited = 1 WHERE id = ?').run(JSON.stringify(subjects), id);
+    return presentBook(getBookRow(id));
+  });
 }
 
 // ---- Estante ----
@@ -651,7 +707,8 @@ export function exportAll() {
     app: 'orelha',
     books: q(`SELECT b.* FROM books b WHERE
       EXISTS (SELECT 1 FROM shelf s WHERE s.book_id = b.id) OR EXISTS (SELECT 1 FROM logs l WHERE l.book_id = b.id)
-      OR EXISTS (SELECT 1 FROM list_items i WHERE i.book_id = b.id) OR EXISTS (SELECT 1 FROM quotes c WHERE c.book_id = b.id)`),
+      OR EXISTS (SELECT 1 FROM list_items i WHERE i.book_id = b.id) OR EXISTS (SELECT 1 FROM quotes c WHERE c.book_id = b.id)
+      OR EXISTS (SELECT 1 FROM favorites f WHERE f.book_id = b.id) OR EXISTS (SELECT 1 FROM progress p WHERE p.book_id = b.id)`),
     shelf: q('SELECT * FROM shelf'),
     logs: q('SELECT * FROM logs'),
     progress: q('SELECT * FROM progress'),

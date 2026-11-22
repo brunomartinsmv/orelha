@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { authorRail, belongsTo, genresOf, isWorthShowing, lovedAuthors, pickSeeds, rankRail, shelfIndex, tasteProfile } from '../server/recommend.js';
+import { authorRail, belongsTo, GENRES, genresOf, isWorthShowing, lovedAuthors, otherSubjectsOf, pickSeeds, rankRail, shelfIndex, tasteProfile } from '../server/recommend.js';
 
 const lotr = { id: 'OL1', ol_key: 'OL1', title: 'O Senhor dos Anéis', original_title: 'The Lord of the Rings', authors: ['J.R.R. Tolkien'], subjects: ['Fantasy fiction'], rating: 10, liked: 1, status: 'read' };
 const hobbit = { id: 'OL2', ol_key: 'OL2', title: 'O Hobbit', original_title: 'The Hobbit', authors: ['J.R.R. Tolkien'], subjects: ['Fantasy'], rating: 8, status: 'read' };
@@ -155,4 +155,11 @@ test('parecidos precisam bater em dois gêneros do livro; sem gênero pedido, na
   const similar = rankRail([one, both], { shelf, taste, seedGenres: ['brazilian', 'historical'], minSeedMatch: 2 });
   assert.deepEqual(similar.map((d) => d.title), ['Brasileiro e histórico']);
   assert.equal(rankRail([one, both], { shelf, taste }).length, 2);
+});
+
+test('todo gênero conhecido reconhece o próprio rótulo em português e separa outros assuntos', () => {
+  for (const g of GENRES) {
+    assert.ok(genresOf([g.label]).includes(g.id), `${g.id} não reconheceu "${g.label}"`);
+  }
+  assert.deepEqual(otherSubjectsOf(['Ficção científica', 'Science fiction', 'Sertão', 'Viagem']), ['Sertão', 'Viagem']);
 });

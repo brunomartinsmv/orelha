@@ -9,23 +9,23 @@ export const GENRES = [
   ['dystopia', 'Distopias', 'dystopias', /dystopi|distopi|totalitarian|thoughtcrime/i],
   ['brazilian', 'Literatura brasileira', 'Brazilian fiction', /brazil|brasil/i],
   ['latin-american', 'Literatura latino-americana', 'Latin American fiction', /latin ?american (fiction|literature)|literatura latino/i],
-  ['portuguese', 'Ficção em português', 'Portuguese fiction', /portuguese (fiction|literature)|literatura portuguesa/i],
+  ['portuguese', 'Ficção em português', 'Portuguese fiction', /portuguese (fiction|literature)|literatura portuguesa|fic[cç][aã]o em portugu[eê]s/i],
   ['russian', 'Literatura russa', 'Russian literature', /russian (fiction|literature)|literatura russa/i],
   ['horror', 'Terror', 'horror', /^horror|horror (fiction|stories)|terror/i, true],
   ['scifi', 'Ficção científica', 'science fiction', /science.?fiction|fic[cç][aã]o cient|ciencia.?ficci/i, true],
   ['fantasy', 'Fantasia', 'fantasy fiction', /^fantasy|fantasy fiction|^fantasia/i, true],
-  ['mystery', 'Mistério', 'detective and mystery stories', /detective|mystery/i, true],
+  ['mystery', 'Mistério', 'detective and mystery stories', /detective|mystery|^mist[eé]rio/i, true],
   ['historical', 'Ficção histórica', 'historical fiction', /historical fiction|fic[cç][aã]o hist/i],
-  ['psychological', 'Ficção psicológica', 'psychological fiction', /psychological fiction/i],
+  ['psychological', 'Ficção psicológica', 'psychological fiction', /psychological fiction|fic[cç][aã]o psicol[oó]gica/i],
   ['poetry', 'Poesia', 'poetry', /^poetry|^poesia/i],
   ['short-stories', 'Contos', 'short stories', /short stories|^contos/i],
   ['graphic', 'Quadrinhos', 'graphic novels', /graphic novel|comic books|quadrinhos/i],
-  ['romance', 'Romance', 'love stories', /love stories|romance fiction/i],
+  ['romance', 'Romance', 'love stories', /love stories|romance fiction|^romance$/i],
   ['philosophy', 'Filosofia', 'philosophy', /^philosophy|^filosofia/i],
   ['biography', 'Biografias', 'biography', /^biography|autobiography|^biografia/i],
   ['history', 'História', 'world history', /^history$|world history|^hist[oó]ria$/i],
-  ['science', 'Divulgação científica', 'popular science', /popular science|^science$/i],
-  ['young-adult', 'Jovem adulto', 'young adult fiction', /young adult|juvenile fiction/i],
+  ['science', 'Divulgação científica', 'popular science', /popular science|^science$|divulga[cç][aã]o cient[ií]fica/i],
+  ['young-adult', 'Jovem adulto', 'young adult fiction', /young adult|juvenile fiction|^jovem adulto$/i],
 ].map(([id, label, query, pattern, broad = false]) => ({ id, label, query, pattern, broad }));
 
 const GENRE_BY_ID = new Map(GENRES.map((g) => [g.id, g]));
@@ -33,6 +33,9 @@ export const genre = (id) => GENRE_BY_ID.get(id);
 
 export const genresOf = (subjects = []) =>
   GENRES.filter((g) => subjects.some((s) => g.pattern.test(s))).map((g) => g.id);
+
+export const otherSubjectsOf = (subjects = []) =>
+  subjects.filter((s) => !GENRES.some((g) => g.pattern.test(s)));
 
 // O livro é mesmo desse gênero, e não só tem uma etiqueta perdida?
 export function belongsTo(subjects = [], id) {

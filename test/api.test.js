@@ -11,7 +11,8 @@ process.env.ORELHA_NO_QUOTES = '1';
 
 const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
-const { parseCsv } = await import('../server/importers.js');
+const { parseCsv, normalizeDate, enrichImported } = await import('../server/importers.js');
+const { upsertFromOl } = await import('../server/library.js');
 
 const MAC = '100.64.0.10';
 const IPHONE_V6 = 'fd7a:115c:a1e0::10';
@@ -305,4 +306,538 @@ test('na home, atualizar a página não troca os livros de lugar e a citação v
   assert.equal(quote.text, 'Citação publicada na fonte do livro.');
   assert.equal(quote.source.name, 'Wikiquote');
   assert.deepEqual((await call('GET', '/home')).json.quote, quote);
+});
+
+test('edição de ISBN, sinopse e gêneros atualiza estante e fica protegida da Open Library', async () => {
+  const genresRes = await call('GET', '/genres');
+  assert.equal(genresRes.status, 200);
+  assert.ok(genresRes.json.some((g) => g.id === 'scifi' && g.label === 'Ficção científica'));
+
+  assert.equal((await call('POST', '/books', { title: 'ISBN Ruim', isbn: '123' })).status, 400);
+
+  const created = await newBook('Livro Editável', {
+    isbn: '978-85-359-0277-8',
+    description: 'Sinopse inicial.',
+    subjects: ['Literatura brasileira', 'Sertão'],
+  });
+  assert.equal(created.isbn, '9788535902778');
+  assert.equal(created.cover, '/covers/isbn/9788535902778');
+
+  await call('PUT', `/books/${created.id}/shelf`, { status: 'read' });
+  let page = (await call('GET', `/books/${created.id}`)).json;
+  assert.equal(page.book.description, 'Sinopse inicial.');
+  assert.deepEqual(page.book.genres, ['brazilian']);
+  assert.deepEqual(page.book.other_subjects, ['Sertão']);
+
+  assert.equal((await call('PATCH', `/books/${created.id}`, { isbn: 'invalido' })).status, 400);
+
+  const updated = await call('PATCH', `/books/${created.id}`, {
+    isbn: '85-359-0277-X',
+    description: 'Sinopse revisada pelo leitor.',
+    subjects: ['Ficção científica', 'Mistério', 'Memória'],
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.json.isbn, '853590277X');
+
+  page = (await call('GET', `/books/${created.id}`)).json;
+  assert.equal(page.book.description, 'Sinopse revisada pelo leitor.');
+  assert.deepEqual(page.book.genres, ['scifi', 'mystery']);
+  assert.deepEqual(page.book.other_subjects, ['Memória']);
+
+  const [onShelf] = (await call('GET', '/shelf?status=read&q=Livro Editável')).json;
+  assert.deepEqual(onShelf.genres, ['scifi', 'mystery']);
+
+  // Livro vindo da Open Library editado pelo usuário não perde sinopse/gêneros ao buscar detalhes.
+  upsertFromOl({
+    ol_key: 'OL999999W',
+    title: 'Obra OL',
+    title_is_pt: 1,
+    original_title: null,
+    subtitle: null,
+    authors: ['Autora OL'],
+    year: 2020,
+    pages: 200,
+    isbn: null,
+    cover_id: null,
+    subjects: [],
+  });
+  await call('PATCH', '/books/OL999999W', { description: '', subjects: [] });
+  for (const [key, val] of [
+    ['https://openlibrary.org/works/OL999999W.json', { title: 'Obra OL', description: 'Texto da OL', subjects: ['Fantasy'], covers: [42] }],
+    ['https://openlibrary.org/works/OL999999W/ratings.json', { summary: { average: null, count: 0 } }],
+    ['https://openlibrary.org/works/OL999999W/bookshelves.json', { counts: {} }],
+  ]) {
+    db.prepare('INSERT INTO api_cache (key, value, expires_at) VALUES (?, ?, ?)').run(key, JSON.stringify(val), Date.now() + 86_400_000);
+  }
+  const olPage = (await call('GET', '/books/OL999999W')).json;
+  assert.equal(olPage.book.description, null);
+  assert.deepEqual(olPage.book.subjects, []);
+  assert.equal(olPage.book.cover, '/covers/id/42');
+});
+
+test('parseCsv detecta ponto-e-vírgula automaticamente', () => {
+  const rows = parseCsv('Título;Autor;Nota\r\n"A; B";Fulano;4,5\r\n');
+  assert.deepEqual(rows, [{ Título: 'A; B', Autor: 'Fulano', Nota: '4,5' }]);
+});
+
+test('importa CSV do Skoob (formato Goodreads com Bookshelves e formato em português) sem duplicar', async () => {
+  const skoobGr = `Title,Author,ISBN,ISBN13,My Rating,Number of Pages,Year Published,Date Read,Bookshelves,My Review
+Skoob Um,Marina Autora,,9788500000101,"4,5",280,2021,15/08/2024,"lido, favoritos",Muito bom
+Skoob Dois,Pedro Autor,,9788500000102,0,190,2022,,abandonei,
+Skoob Tres,Lia Autora,,9788500000103,0,310,2023,,quero-ler,
+`;
+  const first = (await call('POST', '/import', skoobGr)).json;
+  assert.equal(first.format, 'Skoob');
+  assert.equal(first.books_added, 3);
+  assert.equal(first.logs_added, 1);
+
+  const again = (await call('POST', '/import', skoobGr)).json;
+  assert.equal(again.books_added, 0);
+  assert.equal(again.logs_added, 0);
+
+  const [readBook] = (await call('GET', '/shelf?status=read&q=Skoob Um')).json;
+  assert.equal(readBook.rating, 9);
+  assert.equal(readBook.liked, true);
+  assert.equal(readBook.last_finished, '2024-08-15');
+  assert.equal((await call('GET', '/shelf?status=dropped&q=Skoob Dois')).json.length, 1);
+  assert.equal((await call('GET', '/shelf?status=want&q=Skoob Tres')).json.length, 1);
+
+  const skoobPt = `Título;Autor;ISBN;Páginas;Ano;Estante;Nota;Lido em;Resenha
+Skoob Quatro;Clara Autora;9788500000104;215;2018;Lido;5;03/11/2025;Adorei
+`;
+  const ptRes = (await call('POST', '/import', skoobPt)).json;
+  assert.equal(ptRes.format, 'Skoob');
+  assert.equal(ptRes.books_added, 1);
+  assert.equal(ptRes.logs_added, 1);
+  const [ptBook] = (await call('GET', '/shelf?status=read&q=Skoob Quatro')).json;
+  assert.equal(ptBook.rating, 10);
+  assert.equal(ptBook.last_finished, '2025-11-03');
+});
+
+test('reimporta o próprio CSV do Orelha e restaura backup JSON completo de forma idempotente', async () => {
+  const b1 = await newBook('Backup Um', {
+    isbn: '9788500000201',
+    description: 'Sinopse para backup.',
+    subjects: ['Literatura brasileira', 'Sertão'],
+    pages: 350,
+    year: 2019,
+  });
+  const b2 = await newBook('Backup Dois', { pages: 180 });
+  await call('POST', `/books/${b1.id}/logs`, {
+    rating: 9,
+    finished_on: '2025-07-10',
+    started_on: '2025-07-01',
+    review: 'Excelente leitura',
+    spoilers: true,
+    reread: true,
+    format: 'paper',
+    liked: true,
+  });
+  await call('POST', `/books/${b2.id}/progress`, { page: 45, on_day: '2025-07-12' });
+  await call('POST', `/books/${b1.id}/quotes`, { text: 'Frase marcante do backup.', page: 123 });
+  const list = (await call('POST', '/lists', { title: 'Lista do Backup', description: 'Top', ranked: true })).json;
+  await call('POST', `/lists/${list.id}/items`, { book_id: b2.id });
+  await call('POST', `/lists/${list.id}/items`, { book_id: b1.id });
+  await call('PUT', '/favorites/2', { book_id: b1.id });
+
+  const exportedJson = (await call('GET', '/export.json')).json;
+  const exportedCsv = (await call('GET', '/export.csv')).text;
+
+  // Limpa as tabelas para simular restauração num banco zerado.
+  db.exec(`
+    DELETE FROM favorites;
+    DELETE FROM list_items;
+    DELETE FROM lists;
+    DELETE FROM quotes;
+    DELETE FROM progress;
+    DELETE FROM logs;
+    DELETE FROM shelf;
+    DELETE FROM books;
+  `);
+
+  const restored = (await call('POST', '/import', JSON.stringify(exportedJson))).json;
+  assert.equal(restored.format, 'Orelha (JSON)');
+  assert.ok(restored.books_added >= 2);
+  assert.ok(restored.logs_added >= 1);
+  assert.ok(restored.quotes_added >= 1);
+  assert.ok(restored.lists_added >= 1);
+
+  const page1 = (await call('GET', `/books/${b1.id}`)).json;
+  assert.equal(page1.book.description, 'Sinopse para backup.');
+  assert.deepEqual(page1.book.genres, ['brazilian']);
+  assert.equal(page1.book.liked, true);
+  assert.equal(page1.logs[0].rating, 9);
+  assert.equal(page1.logs[0].spoilers, true);
+  assert.equal(page1.logs[0].reread, true);
+  assert.equal(page1.logs[0].format, 'paper');
+  assert.equal(page1.quotes[0].text, 'Frase marcante do backup.');
+  assert.equal(page1.quotes[0].page, 123);
+  assert.equal(page1.favorite_slot, 2);
+
+  const page2 = (await call('GET', `/books/${b2.id}`)).json;
+  assert.equal(page2.book.status, 'reading');
+  assert.equal(page2.book.current_page, 45);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM progress WHERE book_id = ?').get(b2.id).n, 1);
+
+  const lists = (await call('GET', '/lists')).json;
+  const restoredList = (await call('GET', `/lists/${lists.find((l) => l.title === 'Lista do Backup').id}`)).json;
+  assert.equal(restoredList.ranked, true);
+  assert.deepEqual(restoredList.books.map((b) => b.id), [b2.id, b1.id]);
+
+  // Repetir a importação do mesmo JSON não duplica nada.
+  const repeat = (await call('POST', '/import', JSON.stringify(exportedJson))).json;
+  assert.equal(repeat.books_added, 0);
+  assert.equal(repeat.logs_added, 0);
+  assert.equal(repeat.quotes_added, 0);
+  assert.equal(repeat.lists_added, 0);
+
+  // Reimportar o próprio CSV exportado também é reconhecido e idempotente.
+  db.exec(`DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  const csvRestored = (await call('POST', '/import', exportedCsv)).json;
+  assert.equal(csvRestored.format, 'Orelha (CSV)');
+  assert.ok(csvRestored.books_added >= 2);
+  assert.ok(csvRestored.logs_added >= 1);
+  const csvRepeat = (await call('POST', '/import', exportedCsv)).json;
+  assert.equal(csvRepeat.books_added, 0);
+  assert.equal(csvRepeat.logs_added, 0);
+
+  // Recusa JSON inválido ou de outro formato.
+  assert.equal((await call('POST', '/import', '{quebrado')).status, 400);
+  assert.equal((await call('POST', '/import', JSON.stringify({ app: 'outro', books: [] }))).status, 400);
+});
+
+test('PATCH com ISBN inválido é atômico e alterar capa por ISBN limpa a cor anterior', async () => {
+  const book = await newBook('Título Original', { isbn: '9788500000301' });
+  await call('PATCH', `/books/${book.id}`, { color: '#112233' });
+  assert.equal((await call('GET', `/books/${book.id}`)).json.book.color, '#112233');
+
+  const bad = await call('PATCH', `/books/${book.id}`, { title: 'Não Deve Salvar', isbn: '123' });
+  assert.equal(bad.status, 400);
+  assert.equal((await call('GET', `/books/${book.id}`)).json.book.title, 'Título Original');
+
+  const ok = await call('PATCH', `/books/${book.id}`, { isbn: '9788500000302' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.color, null);
+});
+
+test('CSV malformado rejeita aspas abertas; datas BR e reimportação de leituras manuais/sem data funcionam', async () => {
+  assert.equal(normalizeDate('15/08/2024'), '2024-08-15');
+  assert.equal(normalizeDate('31/02/2024'), null);
+  assert.equal((await call('POST', '/import', 'Title,Author,Bookshelves\n"Aberto,Fulano,lido')).status, 400);
+
+  // Duas leituras sem data de término no banco de origem -> export CSV -> reimportar no mesmo banco não duplica.
+  const b = await newBook('Sem Data Duplo', { isbn: '9788500000401' });
+  await call('POST', `/books/${b.id}/logs`, { rating: 6, review: 'Primeira vez' });
+  await call('POST', `/books/${b.id}/logs`, { rating: 10, review: 'Segunda vez', reread: true });
+  // Leitura concluída com started_on antigo não pode vazar para shelf.started_on ao importar.
+  const bHist = await newBook('Histórico 2021', { isbn: '9788500000402' });
+  await call('POST', `/books/${bHist.id}/logs`, { rating: 8, started_on: '2021-01-10', finished_on: '2021-02-01' });
+
+  const csv = (await call('GET', '/export.csv')).text;
+  const sameDb = (await call('POST', '/import', csv)).json;
+  assert.equal(sameDb.logs_added, 0);
+  assert.equal((await call('GET', `/books/${b.id}`)).json.logs.length, 2);
+
+  // Em banco vazio, ambas as leituras sem data são preservadas e shelf.started_on fica nulo para livro lido.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const fresh = (await call('POST', '/import', csv)).json;
+  assert.ok(fresh.logs_added >= 3);
+  const [restoredDouble] = (await call('GET', '/shelf?status=read&q=Sem Data Duplo')).json;
+  assert.equal((await call('GET', `/books/${restoredDouble.id}`)).json.logs.length, 2);
+  const [restoredHist] = (await call('GET', '/shelf?status=read&q=Histórico 2021')).json;
+  assert.equal(restoredHist.started_on, null);
+
+  // Repetir a importação no banco recém-restaurado também não duplica.
+  assert.equal((await call('POST', '/import', csv)).json.logs_added, 0);
+
+  // Fallback de ISBN em CSV em português quando ISBN13 é inválido.
+  const ptFallback = `Título;Autor;ISBN13;ISBN10;Estante\nFallback BR;Autora;N/A;8535902775;quero-ler\n`;
+  assert.equal((await call('POST', '/import', ptFallback)).json.books_added, 1);
+  const [fb] = (await call('GET', '/shelf?status=want&q=Fallback BR')).json;
+  assert.equal(fb.isbn, '8535902775');
+});
+
+test('restauração JSON preserva identidades distintas, favoritos sem estante, cronologia, demo e user_edited', async () => {
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+
+  // Dois volumes com mesmo prefixo antes de ":", dois logs idênticos sem data, duas listas homônimas,
+  // livro favoritado sem estante, cronologia de notas sem finished_on, e um livro demo.
+  const vol1 = await newBook('Coleção: Volume I', { authors: 'Ana', isbn: '9788500000501' });
+  const vol2 = await newBook('Coleção: Volume II', { authors: 'Ana', isbn: '9788500000502' });
+  const favOnly = await newBook('Só Favorito');
+  await call('PUT', '/favorites/1', { book_id: favOnly.id });
+
+  await call('POST', `/books/${vol1.id}/logs`, { rating: 4 });
+  await call('POST', `/books/${vol1.id}/logs`, { rating: 4 });
+  // Leitura antiga (nota 4) vs mais recente (nota 10), ambas sem finished_on:
+  db.prepare(`INSERT INTO logs (book_id, rating, created_at) VALUES (?, 4, '2024-01-01 10:00:00')`).run(vol2.id);
+  db.prepare(`INSERT INTO logs (book_id, rating, created_at) VALUES (?, 10, '2025-06-01 10:00:00')`).run(vol2.id);
+  await call('PUT', `/books/${vol2.id}/shelf`, { status: 'read' });
+
+  const l1 = (await call('POST', '/lists', { title: 'Mesmo Nome', description: 'Primeira', ranked: true })).json;
+  const l2 = (await call('POST', '/lists', { title: 'Mesmo Nome', description: 'Segunda', ranked: false })).json;
+  await call('POST', `/lists/${l1.id}/items`, { book_id: vol1.id });
+  await call('POST', `/lists/${l2.id}/items`, { book_id: vol2.id });
+
+  const demoBook = await newBook('Livro Exemplo');
+  db.prepare(`INSERT INTO shelf (book_id, status, demo) VALUES (?, 'want', 1)`).run(demoBook.id);
+
+  // Livro vindo da OL editado pelo usuário no backup.
+  upsertFromOl({
+    ol_key: 'OL777777W', title: 'Original OL', title_is_pt: 0, original_title: null, subtitle: null,
+    authors: ['Autor'], year: 2000, pages: 150, isbn: null, cover_id: 99, subjects: ['Fantasy'],
+  });
+  await call('PATCH', '/books/OL777777W', { title: 'Título Editado', subjects: ['Mistério'] });
+  await call('PUT', '/books/OL777777W/shelf', { status: 'read' });
+
+  const backup = (await call('GET', '/export.json')).json;
+  assert.ok(backup.books.some((b) => b.id === favOnly.id), 'livro só em favorites entra no export');
+
+  // Limpa banco e coloca apenas o cache não-editado da OL para OL777777W.
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+  upsertFromOl({
+    ol_key: 'OL777777W', title: 'Original OL', title_is_pt: 0, original_title: null, subtitle: null,
+    authors: ['Autor'], year: 2000, pages: 150, isbn: null, cover_id: 99, subjects: ['Fantasy'],
+  });
+
+  const restored = (await call('POST', '/import', JSON.stringify(backup))).json;
+  assert.equal(restored.skipped, 0);
+  assert.equal((await call('GET', `/books/${vol1.id}`)).json.logs.length, 2);
+  assert.equal((await call('GET', `/books/${vol2.id}`)).json.book.rating, 10);
+  assert.equal((await call('GET', `/books/${favOnly.id}`)).json.favorite_slot, 1);
+  assert.equal((await call('GET', '/lists')).json.filter((l) => l.title === 'Mesmo Nome').length, 2);
+  assert.equal((await call('GET', '/home')).json.demo, true);
+
+  // A edição do backup prevalece sobre o cache não editado da OL.
+  const olRestored = (await call('GET', '/books/OL777777W')).json;
+  assert.equal(olRestored.book.title, 'Título Editado');
+  assert.deepEqual(olRestored.book.subjects, ['Mistério']);
+
+  // Segunda importação do mesmo backup é idempotente.
+  const second = (await call('POST', '/import', JSON.stringify(backup))).json;
+  assert.equal(second.books_added, 0);
+  assert.equal(second.logs_added, 0);
+  assert.equal(second.lists_added, 0);
+
+  // Se o leitor limpar sinopse/assuntos localmente (user_edited = 1), restaurar um backup antigo não repõe.
+  await call('PATCH', `/books/${vol1.id}`, { description: '', subjects: [] });
+  await call('POST', '/import', JSON.stringify({
+    ...backup,
+    books: backup.books.map((b) => (b.id === vol1.id ? { ...b, description: 'Voltou?', subjects: '["Fantasia"]' } : b)),
+  }));
+  const afterLocalClear = (await call('GET', `/books/${vol1.id}`)).json;
+  assert.equal(afterLocalClear.book.description, null);
+  assert.deepEqual(afterLocalClear.book.subjects, []);
+
+  // Referências órfãs (ex.: favorito de backup antigo sem livro) são contabilizadas em skipped.
+  const orphan = (await call('POST', '/import', JSON.stringify({
+    app: 'orelha',
+    books: [],
+    favorites: [{ slot: 4, book_id: 'inexistente' }],
+    lists: [{ title: 'Lista sem ID' }],
+    list_items: [{ book_id: vol1.id, position: 0 }],
+  }))).json;
+  assert.equal(orphan.skipped, 2);
+
+  // Enriquecimento em segundo plano respeita user_edited = 1 (não apaga subjects do leitor).
+  const imp = await newBook('Importado Editado', { subjects: ['Terror'] });
+  db.prepare(`UPDATE books SET source = 'import', details_at = NULL, ol_key = NULL WHERE id = ?`).run(imp.id);
+  const fields = 'key,title,subtitle,author_name,first_publish_year,cover_i,number_of_pages_median,isbn,subject,editions,editions.title,editions.cover_i,editions.language,editions.isbn,ratings_average,ratings_count,readinglog_count,author_alternative_name';
+  for (const [q, limit] of [['Importado Editado Fulana de Tal', '20'], ['Importado Editado Fulana de Tal language:por', '15']]) {
+    const params = new URLSearchParams({ q, limit, fields, lang: 'por' });
+    db.prepare('INSERT OR REPLACE INTO api_cache (key, value, expires_at) VALUES (?, ?, ?)').run(
+      `https://openlibrary.org/search.json?${params}`,
+      JSON.stringify({ docs: [{ key: '/works/OL888888W', title: 'Importado Editado', author_name: ['Fulana de Tal'], cover_i: 55, subject: ['Fantasy'] }] }),
+      Date.now() + 86_400_000,
+    );
+  }
+  delete process.env.ORELHA_NO_ENRICH;
+  try {
+    await enrichImported();
+  } finally {
+    process.env.ORELHA_NO_ENRICH = '1';
+  }
+  const enrichedRow = db.prepare('SELECT subjects, cover_id FROM books WHERE id = ?').get(imp.id);
+  assert.deepEqual(JSON.parse(enrichedRow.subjects), ['Terror']);
+  assert.equal(enrichedRow.cover_id, 55);
+});
+
+test('reserva IDs do backup no fallback por ISBN, preserva títulos não latinos, edições pós-CSV, releitura e 13+ autores', async () => {
+  db.exec(`
+    DELETE FROM favorites; DELETE FROM list_items; DELETE FROM lists;
+    DELETE FROM quotes; DELETE FROM progress; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;
+  `);
+
+  // 1) Dois livros no backup com o mesmo ISBN, sendo que só o segundo (B) existe no destino.
+  const bookA = await newBook('Edição A', { authors: 'Autora A', isbn: '9788500000601' });
+  const bookB = await newBook('Edição B', { authors: 'Autora B', isbn: '9788500000601' });
+  await call('POST', `/books/${bookA.id}/logs`, { rating: 6, review: 'Resenha de A', finished_on: '2025-01-01' });
+  await call('POST', `/books/${bookB.id}/logs`, { rating: 10, review: 'Resenha de B', finished_on: '2025-02-01' });
+
+  // 2) Coletânea com 13 autores preservada no round-trip JSON e CSV.
+  const manyAuthors = Array.from({ length: 13 }, (_, i) => `Autora ${i + 1}`).join(', ');
+  const anthology = await newBook('Coletânea 13', { authors: manyAuthors });
+  await call('PUT', `/books/${anthology.id}/shelf`, { status: 'want' });
+
+  const backup = (await call('GET', '/export.json')).json;
+  // Remove A e coletânea, deixando apenas B no destino.
+  db.prepare('DELETE FROM books WHERE id IN (?, ?)').run(bookA.id, anthology.id);
+
+  const res = (await call('POST', '/import', JSON.stringify(backup))).json;
+  assert.equal(res.books_added, 2);
+  assert.equal((await call('GET', `/books/${bookA.id}`)).json.logs[0].review, 'Resenha de A');
+  assert.equal((await call('GET', `/books/${bookB.id}`)).json.logs.length, 1);
+  assert.equal((await call('GET', `/books/${bookB.id}`)).json.logs[0].review, 'Resenha de B');
+  assert.equal((await call('GET', `/books/${anthology.id}`)).json.book.authors.length, 13);
+  assert.equal((await call('POST', '/import', JSON.stringify(backup))).json.logs_added, 0);
+
+  // 3) Reimportar CSV do Goodreads após editar a nota localmente não duplica nem reverte a nota.
+  const gr = `Book Id,Title,Author,Additional Authors,ISBN,ISBN13,My Rating,Number of Pages,Year Published,Original Publication Year,Date Read,Bookshelves,Exclusive Shelf,My Review,Spoiler,Read Count
+9,Editado Local,Autora GR,,,,4,200,2020,2020,2025/03/01,,read,,,1
+`;
+  assert.equal((await call('POST', '/import', gr)).json.logs_added, 1);
+  const [grBook] = (await call('GET', '/shelf?status=read&q=Editado Local')).json;
+  const grPage = (await call('GET', `/books/${grBook.id}`)).json;
+  await call('PATCH', `/logs/${grPage.logs[0].id}`, { rating: 10, finished_on: '2025-03-01' });
+  assert.equal((await call('POST', '/import', gr)).json.logs_added, 0);
+  assert.equal((await call('GET', `/books/${grBook.id}`)).json.book.rating, 10);
+
+  // 4) Título em escrita não latina (japonês) sem ISBN não duplica ao reimportar.
+  const jp = `Title,Author,Bookshelves,Date Read\n新雪,藤沢周平,read,2025-04-01\n`;
+  assert.equal((await call('POST', '/import', jp)).json.books_added, 1);
+  const jpAgain = (await call('POST', '/import', jp)).json;
+  assert.equal(jpAgain.books_added, 0);
+  assert.equal(jpAgain.logs_added, 0);
+
+  // 5) Livro lido em 2021 e relido em 2026: CSV do Orelha não copia 2021 para shelf.started_on.
+  const rereadBook = await newBook('Releitura 2026', { isbn: '9788500000602' });
+  await call('POST', `/books/${rereadBook.id}/logs`, { rating: 8, started_on: '2021-01-05', finished_on: '2021-01-20' });
+  await call('PUT', `/books/${rereadBook.id}/shelf`, { status: 'reading', started_on: '2026-11-21' });
+  const rereadCsv = (await call('GET', '/export.csv')).text;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', rereadCsv);
+  const [restoredReread] = (await call('GET', '/shelf?status=reading&q=Releitura 2026')).json;
+  assert.notEqual(restoredReread.started_on, '2021-01-05');
+  assert.equal((await call('GET', `/books/${restoredReread.id}`)).json.logs[0].started_on, '2021-01-05');
+
+  // 6) import_key colidindo entre duas edições (mesma Date Read, ISBNs diferentes):
+  //    a) no JSON, o log da edição restaurada é preservado;
+  //    b) no CSV, a segunda edição recebe chave estável escopada e preserva edições locais.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const ed1Csv = `Title,Author,ISBN13,Date Read,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000701,2025/05/10,read,4,Resenha Ed1\n`;
+  const ed2Csv = `Title,Author,ISBN13,Date Read,Bookshelves,My Rating,My Review\nMesmo Título,Autora X,9788500000702,2025/05/10,read,5,Resenha Ed2\n`;
+  await call('POST', '/import', ed1Csv);
+  const ed1Backup = (await call('GET', '/export.json')).json;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', ed2Csv);
+  const ed2Key = db.prepare('SELECT import_key FROM logs LIMIT 1').get().import_key;
+  assert.equal(ed1Backup.logs[0].import_key, ed2Key, 'as duas edições devem gerar a mesma import_key');
+  const mergedEd = (await call('POST', '/import', JSON.stringify(ed1Backup))).json;
+  assert.equal(mergedEd.books_added, 1);
+  assert.equal(mergedEd.logs_added, 1);
+  const restoredEd1 = (await call('GET', `/books/${ed1Backup.books[0].id}`)).json;
+  assert.equal(restoredEd1.logs.length, 1);
+  assert.equal(restoredEd1.logs[0].review, 'Resenha Ed1');
+
+  // Colisão no mesmo CSV com duas edições + edição local na 2ª edição + reimportar só a 2ª edição não duplica.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const bothEdCsv = `Title,Author,ISBN13,Date Read,Bookshelves,My Rating,My Review
+Mesmo Título,Autora X,9788500000701,2025/05/10,read,4,Resenha Ed1
+Mesmo Título,Autora X,9788500000702,2025/05/10,read,5,Resenha Ed2
+`;
+  await call('POST', '/import', bothEdCsv);
+  const ed2Book = db.prepare('SELECT id FROM books WHERE isbn = ?').get('9788500000702');
+  const ed2Log = db.prepare('SELECT id, import_key FROM logs WHERE book_id = ?').get(ed2Book.id);
+  assert.ok(ed2Log.import_key, 'segunda edição recebe chave estável escopada');
+  await call('PATCH', `/logs/${ed2Log.id}`, { rating: 6, finished_on: '2025-05-10', review: 'Editada' });
+  assert.equal((await call('POST', '/import', ed2Csv)).json.logs_added, 0);
+  assert.equal((await call('GET', `/books/${ed2Book.id}`)).json.logs[0].review, 'Editada');
+
+  // 7) Dois CSVs com leituras sem data distintas (resenhas/releitura diferentes) mantêm ambas,
+  //    registro legado com resenha editada não duplica, mas uma releitura sem data no mesmo livro é importada.
+  const csvA = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,4,,Primeira\n`;
+  const csvB = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nSem Data Mix,Autora Y,9788500000703,read,5,sim,Segunda\n`;
+  assert.equal((await call('POST', '/import', csvA)).json.logs_added, 1);
+  assert.equal((await call('POST', '/import', csvB)).json.logs_added, 1);
+  assert.equal((await call('POST', '/import', csvB)).json.logs_added, 0);
+
+  const { createHash } = await import('node:crypto');
+  const legacyBook = await newBook('Legado Sem Data', { authors: 'Autora Z', isbn: '9788500000704' });
+  const legacyKey = createHash('sha1').update('legado sem data|autora z|').digest('hex');
+  db.prepare(`INSERT INTO logs (book_id, rating, review, import_key) VALUES (?, 8, 'Editada no Orelha', ?)`).run(legacyBook.id, legacyKey);
+  await call('PUT', `/books/${legacyBook.id}/shelf`, { status: 'read' });
+  const legacyCsv = `Title,Author,ISBN13,Bookshelves,My Rating,My Review\nLegado Sem Data,Autora Z,9788500000704,read,4,Resenha original\n`;
+  assert.equal((await call('POST', '/import', legacyCsv)).json.logs_added, 0);
+  assert.equal((await call('GET', `/books/${legacyBook.id}`)).json.logs[0].review, 'Editada no Orelha');
+  // Releitura sem data no livro com registro legado não é engolida pela chave legada.
+  const legacyRereadCsv = `Título,Autores,ISBN,Status,Nota,Releitura,Resenha\nLegado Sem Data,Autora Z,9788500000704,read,5,sim,Releitura nova\n`;
+  assert.equal((await call('POST', '/import', legacyRereadCsv)).json.logs_added, 1);
+  assert.equal((await call('GET', `/books/${legacyBook.id}`)).json.logs.length, 2);
+
+  // 8) Log histórico sem data/nota/resenha (só releitura/formato) sobrevive no CSV do Orelha sem vazar started_on.
+  const histOnly = await newBook('Histórico Sem Nota', { isbn: '9788500000705' });
+  await call('POST', `/books/${histOnly.id}/logs`, { started_on: '2020-01-01', reread: true, format: 'paper' });
+  await call('PUT', `/books/${histOnly.id}/shelf`, { status: 'reading', started_on: '2026-11-21' });
+  const histCsv = (await call('GET', '/export.csv')).text;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  await call('POST', '/import', histCsv);
+  const [restoredHistOnly] = (await call('GET', '/shelf?status=reading&q=Histórico Sem Nota')).json;
+  assert.notEqual(restoredHistOnly.started_on, '2020-01-01');
+  const histPage = (await call('GET', `/books/${restoredHistOnly.id}`)).json;
+  assert.equal(histPage.logs.length, 1);
+  assert.equal(histPage.logs[0].started_on, '2020-01-01');
+  assert.equal(histPage.logs[0].format, 'paper');
+
+  // 9) Marcas/acentos distinguem livros (パン vs バン, Vovó vs Vovô), enquanto NFC/NFD/misto equivalem.
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const pan = await newBook('パン', { authors: '佐藤' });
+  await call('POST', `/books/${pan.id}/logs`, { rating: 8, review: 'Sobre pão' });
+  const panBackup = (await call('GET', '/export.json')).json;
+  db.exec('DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;');
+  const ban = await newBook('バン', { authors: '佐藤' });
+  await call('POST', `/books/${ban.id}/logs`, { rating: 6, review: 'Sobre van' });
+  const panMerged = (await call('POST', '/import', JSON.stringify(panBackup))).json;
+  assert.equal(panMerged.books_added, 1);
+  assert.equal((await call('GET', `/books/${ban.id}`)).json.logs.length, 1);
+  assert.equal((await call('GET', `/books/${pan.id}`)).json.logs[0].review, 'Sobre pão');
+  const nfdCsv = `Title,Author,Bookshelves,Date Read\n${'パン'.normalize('NFD')},佐藤,read,2025-05-01\n`;
+  assert.equal((await call('POST', '/import', nfdCsv)).json.books_added, 0);
+  const mixedCsv = `Title,Author,Bookshelves,Date Read\nCaf\u00e9 com cha\u0301,Autora Mista,read,2025-06-01\n`;
+  const nfcCsv = `Title,Author,Bookshelves,Date Read\nCaf\u00e9 com ch\u00e1,Autora Mista,read,2025-06-01\n`;
+  assert.equal((await call('POST', '/import', mixedCsv)).json.books_added, 1);
+  assert.equal((await call('POST', '/import', nfcCsv)).json.books_added, 0);
+  const accentsCsv = `Title,Author,Bookshelves,My Review\nVovó,Autora Acento,read,Resenha Vovó\nVovô,Autora Acento,read,Resenha Vovô\n`;
+  assert.equal((await call('POST', '/import', accentsCsv)).json.books_added, 2);
+
+  // 10) Restauração parcial com duas listas homônimas idênticas preserva a sobrevivente sem misturar itens.
+  db.exec('DELETE FROM list_items; DELETE FROM lists;');
+  const itemA = await newBook('Item Lista A');
+  const itemB = await newBook('Item Lista B');
+  const la = (await call('POST', '/lists', { title: 'Iguais', description: 'Mesma', ranked: false })).json;
+  const lb = (await call('POST', '/lists', { title: 'Iguais', description: 'Mesma', ranked: false })).json;
+  db.prepare(`UPDATE lists SET created_at = '2025-01-01 12:00:00' WHERE id IN (?, ?)`).run(la.id, lb.id);
+  await call('POST', `/lists/${la.id}/items`, { book_id: itemA.id });
+  await call('POST', `/lists/${lb.id}/items`, { book_id: itemB.id });
+  const listsBackup = (await call('GET', '/export.json')).json;
+  await call('DELETE', `/lists/${la.id}`);
+  await call('POST', '/import', JSON.stringify(listsBackup));
+  const surviving = (await call('GET', `/lists/${lb.id}`)).json;
+  assert.deepEqual(surviving.books.map((b) => b.id), [itemB.id]);
+  const allSame = (await call('GET', '/lists')).json.filter((l) => l.title === 'Iguais');
+  assert.equal(allSame.length, 2);
+  const recreated = (await call('GET', `/lists/${allSame.find((l) => l.id !== lb.id).id}`)).json;
+  assert.deepEqual(recreated.books.map((b) => b.id), [itemA.id]);
+
+  // Em banco vazio com IDs de lista > 1 (ex.: 2 e 3), repetir a restauração preserva os IDs e não mistura itens.
+  db.exec(`DELETE FROM list_items; DELETE FROM lists; DELETE FROM sqlite_sequence WHERE name = 'lists';`);
+  await call('POST', '/import', JSON.stringify(listsBackup));
+  await call('POST', '/import', JSON.stringify(listsBackup));
+  assert.deepEqual((await call('GET', `/lists/${la.id}`)).json.books.map((b) => b.id), [itemA.id]);
+  assert.deepEqual((await call('GET', `/lists/${lb.id}`)).json.books.map((b) => b.id), [itemB.id]);
 });
