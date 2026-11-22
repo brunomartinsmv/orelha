@@ -732,26 +732,34 @@ export function importOrelhaJson(data) {
       }
     }
 
-    // Passo 1: reserva primeiro todas as correspondências exatas por (book_id, dropped_on, created_at)
-    // para que uma entrada sem horário nunca roube a correspondência exata de outra entrada do mesmo backup.
+    // Passo 1: reserva primeiro todas as correspondências exatas por (book_id, dropped_on, created_at).
+    const sameDropKey = (item) => (c) => !usedDropIds.has(c.id) && c.book_id === item.bookId && (c.dropped_on ?? null) === item.droppedOn;
     for (const item of incomingDrops) {
       if (!item.createdAt) continue;
-      const exact = preexistingDrops.find((c) => !usedDropIds.has(c.id)
-        && c.book_id === item.bookId
-        && (c.dropped_on ?? null) === item.droppedOn
-        && c.created_at === item.createdAt);
+      const exact = preexistingDrops.find((c) => sameDropKey(item)(c) && c.created_at === item.createdAt);
       if (exact) {
         usedDropIds.add(exact.id);
         item.matched = true;
       }
     }
-    // Passo 2: concilia o restante com linhas ainda livres (sem horário ou legadas `dropped_on === null`).
+    // Passo 2: eventos datados com horário explícito só podem casar com linhas locais sem horário (`created_at IS NULL`);
+    // conciliá-los antes evita que uma entrada sem horário consuma esse candidato único.
+    for (const item of incomingDrops) {
+      if (item.matched || item.droppedOn === null || !item.createdAt) continue;
+      const match = preexistingDrops.find((c) => sameDropKey(item)(c) && !c.created_at);
+      if (match) {
+        usedDropIds.add(match.id);
+        db.prepare('UPDATE drops SET created_at = ? WHERE id = ?').run(item.createdAt, match.id);
+        match.created_at = item.createdAt;
+        item.matched = true;
+      }
+    }
+    // Passo 3: concilia as entradas restantes (sem horário ou legadas sem data) nas linhas livres, ou insere novas.
     for (const item of incomingDrops) {
       if (item.matched) continue;
-      const sameKey = (c) => !usedDropIds.has(c.id) && c.book_id === item.bookId && (c.dropped_on ?? null) === item.droppedOn;
       const match = item.droppedOn === null || !item.createdAt
-        ? preexistingDrops.find(sameKey)
-        : preexistingDrops.find((c) => sameKey(c) && !c.created_at);
+        ? preexistingDrops.find(sameDropKey(item))
+        : null;
       if (match) {
         usedDropIds.add(match.id);
         if (item.createdAt && !match.created_at) {

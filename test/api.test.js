@@ -1107,6 +1107,37 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
     assert.deepEqual(times, ['2025-07-01 08:00:00', '2025-07-01 09:00:00']);
   }
 
+  // Com um `NULL` local em disputa (`[08:00, NULL, 08:00]`), restaurar `[NULL, 08:00, 09:00]` ou `[09:00, NULL, 08:00]`
+  // prioriza `09:00 -> NULL` antes de `NULL -> 08:00`, mantendo exatamente `[08:00, 08:00, 09:00]` em ambas as ordens.
+  for (const order of [
+    [
+      { book_id: 'ord_2', dropped_on: '2025-07-01', created_at: null },
+      { book_id: 'ord_2', dropped_on: '2025-07-01', created_at: '2025-07-01 08:00:00' },
+      { book_id: 'ord_2', dropped_on: '2025-07-01', created_at: '2025-07-01 09:00:00' },
+    ],
+    [
+      { book_id: 'ord_2', dropped_on: '2025-07-01', created_at: '2025-07-01 09:00:00' },
+      { book_id: 'ord_2', dropped_on: '2025-07-01', created_at: null },
+      { book_id: 'ord_2', dropped_on: '2025-07-01', created_at: '2025-07-01 08:00:00' },
+    ],
+  ]) {
+    db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+    db.prepare(`INSERT INTO books (id, title, authors, source) VALUES ('ord_2', 'Disputa Null', '["Autora"]', 'manual')`).run();
+    db.prepare(`INSERT INTO drops (book_id, dropped_on, created_at) VALUES
+      ('ord_2', '2025-07-01', '2025-07-01 08:00:00'),
+      ('ord_2', '2025-07-01', NULL),
+      ('ord_2', '2025-07-01', '2025-07-01 08:00:00')`).run();
+    await call('POST', '/import', JSON.stringify({
+      app: 'orelha',
+      books: [{ id: 'ord_2', title: 'Disputa Null', authors: ['Autora'] }],
+      shelf: [],
+      drops: order,
+      logs: [],
+    }));
+    const times = db.prepare(`SELECT created_at FROM drops WHERE book_id = 'ord_2' ORDER BY created_at`).all().map((r) => r.created_at);
+    assert.deepEqual(times, ['2025-07-01 08:00:00', '2025-07-01 08:00:00', '2025-07-01 09:00:00']);
+  }
+
   // Importação CSV com livro abandonado preserva o abandono histórico mesmo quando o livro local já está em `reading`.
   db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
   const csvReading = await newBook('Lendo Localmente', { authors: 'Autora CSV', isbn: '9788500000802' });
