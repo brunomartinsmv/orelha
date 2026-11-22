@@ -1,42 +1,52 @@
 # <img src="public/icons/icon.svg" width="32" height="32" alt="" align="top"> Orelha
 
-Diário de leitura pessoal e estante virtual auto-hospedada. Roda localmente no seu computador (com zero dependências externas e sem etapa de build) e pode ser acessado com segurança pelos seus aparelhos na sua rede privada [Tailscale](https://tailscale.com), com consulta em cache e fila offline no PWA para ações essenciais quando o computador está dormindo.
+**Um lugar quieto para os seus livros.**
 
-![Estante de lombadas do Orelha](docs/estante.png)
+O Orelha é um diário de leitura pessoal e uma estante virtual auto-hospedada — sem rede social, sem anúncios e sem depender de nuvem de terceiros. Roda no seu próprio computador com **Node.js 24+**, **zero dependências externas** e **nenhuma etapa de build**, e acompanha você no celular pela sua rede privada [Tailscale](https://tailscale.com), funcionando como PWA mesmo quando o computador está dormindo.
 
-| Início (leitura atual e epígrafe) | Números da leitura e A pilha |
+![Demonstração do Orelha: leitura atual na tela inicial, estante de lombadas 3D, abertura do livro, ordenação por cor, modo escuro e retrospectiva](docs/demo.webp)
+
+> **Dica:** o vídeo em alta resolução (1280×720, 30 fps) também está em [`docs/demo.mp4`](docs/demo.mp4) e na página do projeto em **[brunomartinsmv.github.io/orelha](https://brunomartinsmv.github.io/orelha/)**.
+
+| Página do livro (modo escuro) | No celular (PWA para iOS e Android) |
 | :---: | :---: |
-| ![Tela inicial com livro 3D e citação](docs/inicio.png) | ![Estatísticas e pilha física de livros no modo escuro](docs/numeros.png) |
-
-| Página do livro (modo escuro) | Celular / PWA (iOS e Android) |
-| :---: | :---: |
-| ![Página de Torto Arado no modo escuro](docs/livro.png) | <img src="docs/mobile-estante.png" width="48%" alt="Estante no celular"> <img src="docs/mobile-voce.png" width="48%" alt="Perfil e 4 favoritos no celular"> |
+| ![Página de Torto Arado no modo escuro](docs/livro.png) | <img src="docs/mobile-estante.png" width="48%" alt="Estante de lombadas no celular"> <img src="docs/mobile-voce.png" width="48%" alt="Perfil e 4 livros favoritos no celular"> |
 
 ---
 
-## Funcionalidades
+## Por que o Orelha?
 
-- **Estante física de lombadas:** gera lombadas proporcionais ao número de páginas, extrai automaticamente a cor dominante da capa, escolhe a tipografia pelo gênero literário e abre o livro com animação 3D ao retirá-lo da prateleira.
-- **Diário de leitura completo:** notas de meia em meia estrela (½ a 5), datas de início e término, formato (`papel`, `e-book`, `áudio`), marcação de releitura e resenhas com ocultação opcional de spoilers.
-- **Acompanhamento e metas:** barra de progresso por página nos livros em leitura, meta anual editável e fila de *Quero ler* sugerida direto na tela inicial quando nenhum livro está aberto.
-- **Coleções e sublinhados:** seleção dos seus **4 livros favoritos**, listas personalizadas (comuns ou ranqueadas) e caderno de trechos guardados com número de página.
-- **Números da leitura:** estatísticas por ano ou de todo o histórico, distribuição de notas, autores mais lidos, décadas de publicação, extremos de tamanho e **A pilha** (altura física equivalente em papel).
-- **Descoberta e epígrafes:** recomendações em português baseadas no seu perfil de leitura via [Open Library](https://openlibrary.org) (com fallback na [BrasilAPI](https://brasilapi.com.br) para ISBNs brasileiros) e citações diárias vindas do [Wikiquote em português](https://pt.wikiquote.org).
-- **Portabilidade total:** importação idempotente de históricos em CSV do **Skoob**, **Goodreads**, **StoryGraph** e do próprio Orelha (com busca gradual de capas em segundo plano), exportação completa em CSV ou JSON e restauração de backups JSON pela interface.
-- **PWA e modo offline:** instalável na Tela de Início do iOS/Android, com tema claro/escuro automático ou manual, cache via Service Worker e fila local em IndexedDB para atualizar página, guardar trechos e mudar o status da estante mesmo com o servidor desligado.
+A maioria dos apps de leitura disputa sua atenção com feed, ranking social e anúncios — e guarda anos da sua história literária num banco que não é seu. O Orelha vai na direção oposta: trata seus livros como objetos físicos numa estante particular, com banco SQLite local, interface silenciosa e portabilidade completa.
+
+### Estante e diário
+
+- **Estante física de lombadas:** cada livro ganha uma lombada proporcional ao número de páginas, cor extraída automaticamente da capa e tipografia escolhida pelo gênero literário. Ordene por nota, recentes, autor, título, páginas ou **por cor** — e clique na lombada para puxar o livro da prateleira em 3D e abrir suas anotações ao lado.
+- **Diário completo, do seu jeito:** notas de meia em meia estrela (½ a 5), datas de início e término, formato (`papel`, `e-book`, `áudio`), marcação de releituras e abandonos, resenhas com ocultação opcional de spoilers e edição livre de ISBN, sinopse e gêneros (preservada contra sobrescritas externas).
+- **Coleções e sublinhados:** destaque seus **4 livros favoritos**, organize listas comuns ou ranqueadas e mantenha um caderno de trechos com o número da página.
+
+### Leitura viva, números e descoberta
+
+- **Uma tela inicial que respira:** o livro em leitura aparece em 3D com barra de progresso por página, acompanhado da sua meta anual e de uma epígrafe diária garimpada no [Wikiquote em português](https://pt.wikiquote.org). Sem nenhum livro aberto, sua fila de *Quero ler* assume o lugar.
+- **Números da leitura e Retrospectiva:** acompanhe livros e páginas por mês ou por ano, distribuição de notas, gêneros, formatos, décadas de publicação, autores mais lidos, extremos de tamanho e **A pilha** (a altura física equivalente em papel). Para qualquer ano fechado ou em curso, abra o modo **Retrospectiva** (*"Seu ano em livros"*).
+- **Recomendações locais:** descoberta em português baseada no seu histórico via [Open Library](https://openlibrary.org), com fallback na [BrasilAPI](https://brasilapi.com.br) para ISBNs brasileiros.
+
+### Seu, portátil e pronto para ficar offline
+
+- **Traga sua estante de onde estiver:** importação idempotente de CSV do **Skoob**, **Goodreads**, **StoryGraph** e do próprio Orelha (com busca gradual de capas em segundo plano), além de exportação completa em CSV ou JSON e restauração de backups JSON pela interface.
+- **PWA com fila offline real:** instalável na Tela de Início do iOS e Android, com tema claro/escuro automático ou manual, cache via Service Worker e fila local em IndexedDB. Atualize a página atual, guarde um trecho ou mude o status de um livro mesmo com o servidor desligado — tudo sincroniza em ordem quando ele voltar.
 
 ---
 
 ## Requisitos
 
-- **Node.js 24 ou superior** (utiliza o módulo nativo `node:sqlite` — não há `node_modules` nem `npm install`).
-- *(Opcional)* **Tailscale** no computador servidor (macOS ou Linux) e nos aparelhos clientes, para acesso remoto via HTTPS restrito à sua tailnet.
+- **Node.js 24 ou superior** — usa o módulo nativo `node:sqlite`. Não há `node_modules` nem `npm install`.
+- *(Opcional)* **Tailscale** no computador servidor (macOS ou Linux) e nos aparelhos clientes, para acesso remoto em HTTPS restrito à sua tailnet.
 
 ---
 
 ## Primeiros passos
 
-Clone o repositório e inicie o servidor local:
+Clone o repositório e suba o servidor local:
 
 ```sh
 git clone https://github.com/brunomartinsmv/orelha.git
@@ -45,31 +55,38 @@ cd orelha
 npm start        # abre em http://localhost:4173
 ```
 
-Comandos úteis durante o uso ou desenvolvimento:
+Quer testar a estante cheia antes de cadastrar seus livros?
+
+```sh
+npm run demo     # popula a estante com livros, resenhas e trechos de exemplo
+```
+
+Os dados de exemplo são marcados separadamente e podem ser limpos em um clique pelo botão **"Começar do zero"**, sem tocar no que você registrou.
+
+Outros comandos úteis:
 
 ```sh
 npm run dev      # inicia com recarregamento automático (node --watch)
-npm run demo     # popula a estante com livros e leituras de exemplo (reversível pelo botão "Começar do zero")
-npm test         # executa a suíte de testes automatizados
+npm test         # executa a suíte de testes automatizados (node:test)
 ```
 
 ---
 
 ## Acesso pela Tailnet
 
-O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para acessá-lo do celular sem expor nada à internet pública, o projeto usa o `tailscale serve` com HTTPS aliado a uma lista explícita de dispositivos permitidos.
+O servidor HTTP escuta **exclusivamente em `127.0.0.1`**. Para abrir o Orelha do celular sem expor nada à internet pública, o projeto usa o `tailscale serve` com HTTPS somado a uma lista explícita de aparelhos autorizados.
 
-O Orelha roda em **um só computador** (o servidor), que guarda o único banco de dados. Os outros aparelhos (celular, outro notebook) são clientes: abrem o endereço da tailnet no navegador ou como PWA e não instalam nada. Rodar o servidor em dois computadores criaria dois bancos separados, sem sincronização.
+O Orelha roda em **um único computador** (o servidor), que guarda o único banco de dados. Os outros aparelhos (celular, tablet, outro notebook) são apenas clientes: acessam o endereço da tailnet no navegador ou como PWA, sem instalar nada. Subir o servidor em duas máquinas criaria dois bancos separados, sem sincronização entre eles.
 
-> **Já tem o Orelha rodando nesse computador?** Não clone de novo: os dados ficam em `data/` dentro da instalação atual, e um clone novo começa vazio. Entre na pasta que já existe e rode `scripts/servico-linux.sh atualizar` (ou `scripts/servico.sh atualizar` no macOS). O `instalar` recusa seguir quando percebe esse caso.
+> **Já tem o Orelha rodando nesse computador?** Não clone de novo: seus dados ficam em `data/` dentro da instalação atual, e um clone novo começa vazio. Entre na pasta existente e rode `scripts/servico-linux.sh atualizar` (ou `scripts/servico.sh atualizar` no macOS). O comando `instalar` recusa continuar quando detecta esse caso.
 
-1. No computador que vai servir, faça um clone fixo (por exemplo `~/orelha`, não um worktree: os dados ficam em `data/` dentro dele) e crie a configuração a partir do modelo:
+1. No computador que vai servir, faça um clone fixo (por exemplo `~/orelha` — evite worktrees, pois `data/` fica dentro da pasta) e crie a configuração a partir do modelo:
 
    ```sh
    cp config.example.json config.json
    ```
 
-2. Edite o `config.json` com o domínio da máquina servidora na tailnet e os IPs Tailscale (IPv4 e/ou IPv6) de cada aparelho autorizado, incluindo outros computadores que vão abrir o Orelha. Você pode consultá-los rodando `tailscale status --json`:
+2. Edite o `config.json` com o domínio da máquina servidora na tailnet e os IPs Tailscale (IPv4 e/ou IPv6) de cada aparelho autorizado, incluindo outros computadores que vão abrir o Orelha. Você pode consultá-los com `tailscale status --json`:
 
    ```json
    {
@@ -83,18 +100,18 @@ O Orelha roda em **um só computador** (o servidor), que guarda o único banco d
    }
    ```
 
-3. Instale o serviço em segundo plano. Os dois scripts têm os mesmos comandos:
+3. Instale o serviço em segundo plano. Os scripts de macOS e Linux oferecem exatamente os mesmos comandos:
 
    | Comando | O que faz |
    | --- | --- |
-   | `verificar` | confere Node 24+, Tailscale, `config.json` e testes, sem mudar nada |
-   | `instalar` | verifica, registra o serviço, espera o servidor responder e ativa HTTPS na porta `publicPort` |
-   | `atualizar` | testa a versão nova numa cópia à parte, faz backup, avança o branch e reinicia; se a versão nova não subir, volta para a anterior |
-   | `backup` | copia o banco e as capas enviadas para fora do projeto (o `instalar` já liga um backup diário) |
-   | `reiniciar` | reinicia e confere se o servidor voltou |
-   | `status` | estado do processo, versão no ar e `tailscale serve` |
+   | `verificar` | confere Node 24+, Tailscale, `config.json` e testes, sem alterar nada |
+   | `instalar` | verifica, registra o serviço, espera o servidor responder e ativa HTTPS na `publicPort` |
+   | `atualizar` | testa a versão nova numa cópia isolada, faz backup, avança o branch e reinicia; se não subir, volta para a anterior |
+   | `backup` | copia o banco e as capas enviadas para fora do projeto (o `instalar` já ativa um backup diário) |
+   | `reiniciar` | reinicia e confere se o servidor voltou a responder |
+   | `status` | mostra estado do processo, versão no ar e configuração do `tailscale serve` |
    | `logs` | acompanha o log do servidor |
-   | `remover` | desativa o serviço (seus dados em `data/` são preservados) |
+   | `remover` | desativa o serviço preservando todos os dados em `data/` |
 
    **macOS** (LaunchAgent, log em `data/orelha.log`):
 
@@ -105,17 +122,17 @@ O Orelha roda em **um só computador** (o servidor), que guarda o único banco d
    **Linux** (serviço de usuário do systemd, log no `journalctl`):
 
    ```sh
-   sudo tailscale set --operator=$USER   # uma vez: deixa seu usuário configurar o tailscale serve sem sudo
-   scripts/servico-linux.sh instalar     # também liga o linger, para o Orelha subir no boot sem login
+   sudo tailscale set --operator=$USER   # uma vez: permite configurar o tailscale serve sem sudo
+   scripts/servico-linux.sh instalar     # também ativa o linger, para o Orelha subir no boot sem login
    ```
 
    Num notebook servindo o Orelha, impeça que ele suspenda ao fechar a tampa: em `/etc/systemd/logind.conf`, defina `HandleLidSwitch=ignore` e `HandleLidSwitchExternalPower=ignore`, e depois rode `sudo systemctl restart systemd-logind`.
 
-4. Abra `https://<tailnetHost>:<publicPort>` no Safari do iPhone e use **Compartilhar → Adicionar à Tela de Início** para usá-lo como aplicativo nativo.
+4. Abra `https://<tailnetHost>:<publicPort>` no Safari do iPhone (ou Chrome no Android) e use **Compartilhar → Adicionar à Tela de Início** para usá-lo como aplicativo nativo.
 
 ### Atualizando e lançando versões
 
-Para levar uma nova versão ao computador que serve o Orelha:
+Para levar uma versão nova ao computador que serve o Orelha:
 
 ```sh
 scripts/servico.sh atualizar        # macOS
@@ -125,50 +142,48 @@ scripts/servico-linux.sh atualizar  # Linux
 Para lançar uma versão:
 
 1. Mova as entradas de **[Não publicado]** no [CHANGELOG.md](CHANGELOG.md) para uma nova seção com número e data.
-2. Atualize `version` no `package.json`; é a única fonte da versão (o `User-Agent` e o `/api/health` a leem dali).
+2. Atualize `version` no `package.json` — é a única fonte da versão (o `User-Agent` e o `/api/health` a leem dali).
 3. Se a lista de arquivos do app mudou, ajuste `SHELL_FILES` e suba `VERSION` em `public/sw.js`.
-4. Faça o commit, crie a tag anotada (`git tag -a v1.2.3 -m v1.2.3`) e envie com `git push --follow-tags`. Uma tag leve, sem `-a`, não vai junto.
-
-### Modelo de segurança e funcionamento offline
-
-- **Validação de origem e dispositivo:** requisições vindas do `tailscale serve` recebem o IP real do cliente no final de `X-Forwarded-For`; aparelhos fora de `allowedDevices`, `Host` desconhecidos (proteção contra *DNS rebinding*) ou escritas de outras origens recebem `403 Forbidden`.
-- **Backups:** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Para ter uma cópia fora do computador, configure um remoto no [rclone](https://rclone.org) (ex.: Google Drive com `scope = drive.file`) e ponha `"backupRemoto": "gdrive:Orelha/backups"` no `config.json`: cada backup diário espelha a pasta lá.
-- **Uso offline com o servidor dormindo:** o Service Worker mantém a interface, capas e a última cópia dos dados em cache; atualizações de página, trechos e status da estante ficam em uma fila local no IndexedDB com atualização otimista na tela e sincronizam em ordem quando o servidor voltar a responder.
+4. Faça o commit, crie a tag anotada (`git tag -a v1.2.3 -m v1.2.3`) e envie com `git push --follow-tags` (tags leves, sem `-a`, não acompanham).
 
 ---
 
-## Privacidade e fontes externas
+## Segurança, backups e privacidade
 
-- Todos os seus dados ficam localmente em `data/orelha.sqlite` e as capas baixadas ou enviadas ficam em `data/covers/` (ambos ignorados pelo Git).
-- Metadados de busca e capas são consultados na **Open Library** e, para ISBNs nacionais ausentes lá, na **BrasilAPI**, sendo cacheados localmente.
-- A epígrafe exibida na página inicial consulta apenas títulos e nomes de autores dos livros lidos/em leitura no **Wikiquote em português** (com cache de 30 dias). Suas resenhas, notas, datas e trechos pessoais nunca saem do seu computador.
+- **Acesso restrito por aparelho:** requisições vindas do `tailscale serve` trazem o IP real do cliente no final de `X-Forwarded-For`; dispositivos fora de `allowedDevices`, `Host` desconhecidos (proteção contra *DNS rebinding*) ou escritas de outras origens recebem `403 Forbidden`.
+- **Backups automáticos (e espelho na nuvem, se quiser):** ficam em `~/.local/share/orelha/backups` no Linux e em `~/Library/Application Support/Orelha/backups` no macOS (ou em `ORELHA_BACKUP_DIR`). Para manter uma cópia fora do computador, configure um remoto no [rclone](https://rclone.org) (ex.: Google Drive com `scope = drive.file`) e adicione `"backupRemoto": "gdrive:Orelha/backups"` no `config.json`: cada backup diário espelha a pasta lá.
+- **Seus dados ficam com você:** o banco reside em `data/orelha.sqlite` e as capas em `data/covers/` (ambos ignorados pelo Git).
+- **Consultas externas mínimas:** metadados e capas vêm da **Open Library** (e da **BrasilAPI** para ISBNs nacionais ausentes lá), sempre cacheados localmente. A epígrafe da página inicial consulta apenas títulos e nomes de autores no **Wikiquote em português** (cache de 30 dias). Suas notas, resenhas, datas e trechos pessoais nunca saem da sua máquina.
 
 ---
 
 ## Estrutura do projeto
 
 ```text
-├── CHANGELOG.md             # Histórico de versões (Keep a Changelog)
-├── config.example.json      # Modelo de configuração de portas e IPs da tailnet
+├── CHANGELOG.md                 # Histórico de versões (Keep a Changelog)
+├── config.example.json          # Modelo de configuração de portas e IPs da tailnet
 ├── server/
-│   ├── index.js             # Ponto de entrada (escuta apenas em 127.0.0.1)
-│   ├── version.js           # Versão lida do package.json (User-Agent e /api/health)
-│   ├── app.js               # Roteador HTTP, controle de acesso, upload e cache de capas
-│   ├── db.js                # Esquema SQLite nativo (node:sqlite) e transações
-│   ├── library.js           # Regras de domínio: estante, diário, listas, metas e estatísticas
-│   ├── openlibrary.js       # Busca e normalização de catálogo (Open Library + BrasilAPI)
-│   ├── recommend.js         # Motor local de recomendações por perfil de gosto
-│   ├── quotations.js        # Extração e cache diário de citações do Wikiquote
-│   └── importers.js         # Parser CSV (Goodreads/StoryGraph) e enriquecimento gradual
+│   ├── index.js                 # Ponto de entrada (escuta apenas em 127.0.0.1)
+│   ├── version.js               # Versão lida do package.json (User-Agent e /api/health)
+│   ├── app.js                   # Roteador HTTP, controle de acesso, upload e cache de capas
+│   ├── db.js                    # Esquema SQLite nativo (node:sqlite) e transações
+│   ├── library.js               # Regras de domínio: estante, diário, listas, metas e estatísticas
+│   ├── openlibrary.js           # Busca e normalização de catálogo (Open Library + BrasilAPI)
+│   ├── recommend.js             # Motor local de recomendações por perfil de leitura
+│   ├── quotations.js            # Extração e cache diário de citações do Wikiquote
+│   └── importers.js             # Importação (Skoob, Goodreads, StoryGraph, Orelha CSV/JSON) e enriquecimento
 ├── public/
-│   ├── index.html           # Shell da aplicação PWA
-│   ├── styles.css           # Sistema visual, temas claro/escuro, livros 3D e estante
-│   ├── sw.js                # Service Worker para funcionamento offline
-│   └── app/                 # Interface em Preact + htm (ES Modules nativos, sem bundler)
+│   ├── index.html               # Shell da aplicação PWA
+│   ├── styles.css               # Sistema visual, temas claro/escuro, livros 3D e estante
+│   ├── sw.js                    # Service Worker para cache e uso offline
+│   └── app/                     # Interface em Preact + htm (ES Modules nativos, sem bundler)
+│       └── sync.js              # Fila local em IndexedDB e sincronização offline idempotente
 ├── scripts/
-│   ├── seed-demo.js         # Popula dados de demonstração
+│   ├── seed-demo.js             # Popula dados de demonstração
+│   ├── backup.js                # Backup íntegro do SQLite + capas e espelhamento via rclone
 │   ├── import-home-catalogue.js # Utilitário de importação de catálogo JSON em lote
-│   ├── servico.sh           # Implantação no macOS: LaunchAgent, tailscale serve, atualização
-│   └── servico-linux.sh     # Implantação no Linux: systemd de usuário, tailscale serve, atualização
-└── test/                    # Testes automatizados com node:test
+│   ├── servico.sh               # Implantação no macOS: LaunchAgent, tailscale serve, atualização
+│   └── servico-linux.sh         # Implantação no Linux: systemd de usuário, tailscale serve, atualização
+├── site/                        # Landing page estática publicada no GitHub Pages
+└── test/                        # Testes automatizados com node:test
 ```
