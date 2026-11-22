@@ -311,6 +311,13 @@ function ensureShelf(bookId) {
   db.prepare('INSERT INTO shelf (book_id) VALUES (?) ON CONFLICT(book_id) DO NOTHING').run(bookId);
 }
 
+// Preserva um abandono legado (status = 'dropped' sem linha em `drops`) antes de alterar o status na estante.
+function preserveLegacyDrop(bookId, prevStatus) {
+  if (prevStatus !== 'dropped') return;
+  const hasDrop = db.prepare('SELECT 1 FROM drops WHERE book_id = ? LIMIT 1').get(bookId);
+  if (!hasDrop) db.prepare('INSERT INTO drops (book_id, dropped_on) VALUES (?, NULL)').run(bookId);
+}
+
 export function updateShelf(bookId, body) {
   requireBook(bookId);
   const VALID = ['want', 'reading', 'read', 'dropped', null];
@@ -321,6 +328,7 @@ export function updateShelf(bookId, body) {
     ensureShelf(bookId);
     const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
     if (body.status !== undefined) {
+      if (body.status !== 'dropped') preserveLegacyDrop(bookId, prev.status);
       db.prepare(`UPDATE shelf SET status = ?, updated_at = datetime('now'),
         started_on = CASE WHEN ? = 'reading' THEN COALESCE(started_on, ?) WHEN ? IN ('want') OR ? IS NULL THEN NULL ELSE started_on END,
         current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END
@@ -348,6 +356,8 @@ export function addProgress(bookId, body) {
   const day = asDate(body.on_day) || today();
   return transaction(() => {
     ensureShelf(bookId);
+    const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
+    preserveLegacyDrop(bookId, prev?.status);
     db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), updated_at = datetime('now') WHERE book_id = ?`)
       .run(page, day, bookId);
     db.prepare('INSERT INTO progress (book_id, page, on_day) VALUES (?, ?, ?)').run(bookId, page, day);
@@ -397,6 +407,8 @@ export function createLog(bookId, body) {
   const f = logFields(body);
   return transaction(() => {
     ensureShelf(bookId);
+    const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
+    preserveLegacyDrop(bookId, prev?.status);
     const started = f.started_on || book.started_on || null;
     const { lastInsertRowid } = db.prepare(`INSERT INTO logs (book_id, finished_on, started_on, rating, review, spoilers, reread, format)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -652,16 +664,16 @@ export function stats({ year }) {
   const years = db.prepare(`SELECT DISTINCT y FROM (
       SELECT substr(finished_on, 1, 4) AS y FROM logs WHERE finished_on IS NOT NULL
       UNION
-      SELECT substr(dropped_on, 1, 4) AS y FROM drops
+      SELECT substr(dropped_on, 1, 4) AS y FROM drops WHERE dropped_on IS NOT NULL
     ) ORDER BY y DESC`).all().map((r) => Number(r.y));
 
-  // Em "Sempre", inclui também abandonos legados (status = 'dropped' sem evento datado em `drops`).
+  // Em "Sempre", soma todos os eventos em `drops` (datados e sem data) mais eventuais legados ainda não materializados.
   const dropped = allTime
     ? db.prepare(`SELECT
         (SELECT COUNT(*) FROM drops) +
         (SELECT COUNT(*) FROM shelf s WHERE s.status = 'dropped' AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id))
       AS n`).get().n
-    : db.prepare(`SELECT COUNT(*) AS n FROM drops WHERE substr(dropped_on, 1, 4) = ?`).get(yearStr).n;
+    : db.prepare(`SELECT COUNT(*) AS n FROM drops WHERE dropped_on IS NOT NULL AND substr(dropped_on, 1, 4) = ?`).get(yearStr).n;
 
   const ratings = Array(10).fill(0);
   const months = Array.from({ length: 12 }, () => ({ books: 0, pages: 0 }));

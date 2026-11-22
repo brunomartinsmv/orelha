@@ -391,6 +391,12 @@ export function importCsv(text) {
             started_on = CASE WHEN COALESCE(status, ?) = 'reading' THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
           .run(effectiveStatus, item.liked ? 1 : 0, effectiveStatus, shelfStartedOn, bookId);
+        if (effectiveStatus === 'dropped') {
+          const curStatus = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId)?.status;
+          if (curStatus === 'dropped' && !db.prepare('SELECT 1 FROM drops WHERE book_id = ? LIMIT 1').get(bookId)) {
+            db.prepare('INSERT INTO drops (book_id, dropped_on) VALUES (?, NULL)').run(bookId);
+          }
+        }
       }
       if (hasLog) {
         const incoming = {
@@ -627,6 +633,8 @@ export function importOrelhaJson(data) {
       if (source === 'import' && !safeOlKey && !detailsAt && !userEdited) needsEnrich = true;
     }
 
+    const hasDrops = Array.isArray(data.drops);
+    const shelfFallbackDrops = [];
     for (const s of Array.isArray(data.shelf) ? data.shelf : []) {
       const bookId = bookIdMap.get(safeBookId(s?.book_id));
       if (!bookId) { result.skipped++; continue; }
@@ -652,6 +660,12 @@ export function importOrelhaJson(data) {
             started_on = CASE WHEN ? THEN COALESCE(started_on, ?) ELSE started_on END
           WHERE book_id = ?`)
           .run(finalStatus, liked, allowRunning ? 1 : 0, currentPage, allowRunning ? 1 : 0, startedOn, bookId);
+      }
+      // Backups sem a coleção `drops` (formato anterior com `shelf[].dropped_on` ou legados sem data).
+      if (!hasDrops) {
+        const shelfDroppedOn = normalizeDate(s.dropped_on);
+        if (shelfDroppedOn) shelfFallbackDrops.push({ book_id: bookId, dropped_on: shelfDroppedOn, demo });
+        else if (status === 'dropped') shelfFallbackDrops.push({ book_id: bookId, dropped_on: null, demo });
       }
     }
 
@@ -694,21 +708,30 @@ export function importOrelhaJson(data) {
       result.logs_added++;
     }
 
-    for (const d of Array.isArray(data.drops) ? data.drops : []) {
-      const bookId = bookIdMap.get(safeBookId(d?.book_id));
-      const droppedOn = normalizeDate(d?.dropped_on);
-      if (!bookId || !droppedOn) { result.skipped++; continue; }
-      const demo = d.demo ? 1 : 0;
-      const createdAt = safeTimestamp(d.created_at);
+    const restoreDrop = (bookId, droppedOn, demo, createdAt) => {
       const match = preexistingDrops.find((c) => !usedDropIds.has(c.id)
         && c.book_id === bookId
-        && c.dropped_on === droppedOn
+        && (c.dropped_on ?? null) === droppedOn
         && (!createdAt || c.created_at === createdAt));
       if (match) {
         usedDropIds.add(match.id);
       } else {
         db.prepare(`INSERT INTO drops (book_id, dropped_on, demo, created_at)
           VALUES (?, ?, ?, COALESCE(?, datetime('now')))`).run(bookId, droppedOn, demo, createdAt);
+      }
+    };
+
+    if (hasDrops) {
+      for (const d of data.drops) {
+        const bookId = bookIdMap.get(safeBookId(d?.book_id));
+        const hasRawDate = d?.dropped_on !== null && d?.dropped_on !== undefined && String(d.dropped_on).trim() !== '';
+        const droppedOn = hasRawDate ? normalizeDate(d.dropped_on) : null;
+        if (!bookId || (hasRawDate && !droppedOn)) { result.skipped++; continue; }
+        restoreDrop(bookId, droppedOn, d.demo ? 1 : 0, safeTimestamp(d.created_at));
+      }
+    } else {
+      for (const d of shelfFallbackDrops) {
+        restoreDrop(d.book_id, d.dropped_on, d.demo, null);
       }
     }
 

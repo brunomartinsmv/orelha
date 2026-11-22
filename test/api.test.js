@@ -982,6 +982,54 @@ test('números agregam gêneros, formatos, páginas, releituras, favoritos do pe
   assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM drops WHERE book_id = ?').get(legacyDrop.id).n, 0);
 
+  // Abandono legado -> retomada -> abandono datado em 2025: mantém o legado em Sempre (total +1) e conta 2025 sem criar ano inválido.
+  await call('PUT', `/books/${legacyDrop.id}/shelf`, { status: 'reading' });
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 3);
+  await call('PUT', `/books/${legacyDrop.id}/shelf`, { status: 'dropped', dropped_on: '2025-06-10' });
+  const s2025 = (await call('GET', '/stats?year=2025')).json;
+  assert.equal(s2025.dropped, 1);
+  assert.deepEqual(s2025.years, [2025, 2023, 2022, 2021]);
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 4);
+
+  // Exportar e restaurar JSON preserva tanto o evento legado (dropped_on = null) quanto o datado de 2025, sem duplicar nem criar ano extra.
+  const legacyCycleBackup = (await call('GET', '/export.json')).json;
+  db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  await call('POST', '/import', JSON.stringify(legacyCycleBackup));
+  await call('POST', '/import', JSON.stringify(legacyCycleBackup));
+  const afterCycle = (await call('GET', '/stats?year=all')).json;
+  assert.equal(afterCycle.dropped, 4);
+  assert.deepEqual(afterCycle.years, [2025, 2023, 2022, 2021]);
+  assert.equal((await call('GET', '/stats?year=2025')).json.dropped, 1);
+
+  // Backup no formato anterior (`shelf[].dropped_on` sem a chave `drops`): recupera a data no livro remapeado de forma idempotente.
+  db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  const oldFormatBackup = {
+    app: 'orelha',
+    books: [{ id: 'old_drop_1', title: 'Backup Anterior', authors: ['Autora'] }],
+    shelf: [{ book_id: 'old_drop_1', status: 'dropped', dropped_on: '2021-02-03' }],
+    logs: [],
+  };
+  const oldRes = (await call('POST', '/import', JSON.stringify(oldFormatBackup))).json;
+  assert.equal(oldRes.skipped, 0);
+  await call('POST', '/import', JSON.stringify(oldFormatBackup));
+  const sOld2021 = (await call('GET', '/stats?year=2021')).json;
+  assert.equal(sOld2021.dropped, 1);
+  assert.ok(sOld2021.years.includes(2021));
+
+  // Quando o backup já traz `drops` (fonte de verdade), `shelf[].dropped_on` residual não duplica o evento.
+  db.exec(`DELETE FROM drops; DELETE FROM logs; DELETE FROM shelf; DELETE FROM books;`);
+  const migratedBackup = {
+    app: 'orelha',
+    books: [{ id: 'mig_drop_1', title: 'Backup Migrado', authors: ['Autora'] }],
+    shelf: [{ book_id: 'mig_drop_1', status: 'dropped', dropped_on: '2021-02-03' }],
+    drops: [{ book_id: 'mig_drop_1', dropped_on: '2021-02-03' }],
+    logs: [],
+  };
+  await call('POST', '/import', JSON.stringify(migratedBackup));
+  await call('POST', '/import', JSON.stringify(migratedBackup));
+  assert.equal((await call('GET', '/stats?year=2021')).json.dropped, 1);
+  assert.equal((await call('GET', '/stats?year=all')).json.dropped, 1);
+
   // Ano sem metadados de gênero, formato nem nota devolve listas/notas vazias (UI oculta esses blocos).
   const plainBook = await newBook('Só Título', { pages: null, subjects: [] });
   await call('POST', `/books/${plainBook.id}/logs`, { finished_on: '2020-06-01' });

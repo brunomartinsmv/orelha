@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS drops (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-  dropped_on TEXT NOT NULL,
+  dropped_on TEXT,
   demo INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -124,6 +124,26 @@ CREATE TABLE IF NOT EXISTS api_cache (
 );
 `);
 
+// Se `drops.dropped_on` foi criada como NOT NULL, recria permitindo NULL para preservar abandonos legados sem data.
+const dropDateCol = db.prepare('PRAGMA table_info(drops)').all().find((c) => c.name === 'dropped_on');
+if (dropDateCol?.notnull) {
+  db.exec(`
+    CREATE TABLE drops_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      dropped_on TEXT,
+      demo INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO drops_new (id, book_id, dropped_on, demo, created_at)
+      SELECT id, book_id, dropped_on, demo, created_at FROM drops;
+    DROP TABLE drops;
+    ALTER TABLE drops_new RENAME TO drops;
+    CREATE INDEX IF NOT EXISTS drops_book ON drops(book_id);
+    CREATE INDEX IF NOT EXISTS drops_date ON drops(dropped_on);
+  `);
+}
+
 // Migra eventuais datas gravadas em `shelf.dropped_on` sem duplicar eventos já existentes.
 const shelfColumns = db.prepare('PRAGMA table_info(shelf)').all().map((c) => c.name);
 if (shelfColumns.includes('dropped_on')) {
@@ -132,6 +152,12 @@ if (shelfColumns.includes('dropped_on')) {
     WHERE s.dropped_on IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id AND d.dropped_on = s.dropped_on)`);
 }
+
+// Materializa abandonos legados (status = 'dropped' sem evento em `drops`) com `dropped_on = NULL`.
+db.exec(`INSERT INTO drops (book_id, dropped_on, demo)
+  SELECT s.book_id, NULL, s.demo FROM shelf s
+  WHERE s.status = 'dropped'
+    AND NOT EXISTS (SELECT 1 FROM drops d WHERE d.book_id = s.book_id)`);
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
