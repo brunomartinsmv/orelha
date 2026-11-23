@@ -7,6 +7,8 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Não publicado]
 
+## [1.1.0] - 2026-11-22
+
 ### Adicionado
 
 - Este changelog.
@@ -20,6 +22,7 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Importação de CSVs exportados do Skoob (formato Goodreads com `Bookshelves` ou colunas em português, datas `DD/MM/YYYY`, notas com vírgula e separador `;`), reimportação do CSV exportado pelo Orelha e restauração idempotente de backups JSON (`/api/export.json`) pela tela de Ajustes.
 - Números da leitura expandidos (`GET /api/stats` e `/numeros`): alternância Livros/Páginas na linha do tempo com eixo Y, distribuição por gênero literário e por formato (`papel`, `e-book`, `áudio`), títulos por década ao interagir, contagem de releituras e histórico datado de abandonos (`drops`), notas de favoritos calculadas pela maior nota no período selecionado e modo **Retrospectiva** ("Seu ano em livros") para anos específicos.
 - Fila local em IndexedDB no PWA (`public/app/sync.js`) para atualizar página atual, guardar trechos e alterar status na estante offline ou quando o servidor está indisponível, com atualização otimista na interface, sincronização automática em ordem e idempotente (`op_id` na tabela `sync_ops`), detecção de conflitos entre aparelhos (`409`) e folha para revisar, forçar ou descartar pendências.
+- Vídeo de demonstração em 1440p @ 60 fps (`docs/demo.mp4` e `docs/demo.webp`), `README.md` reescrito e landing page estática para o GitHub Pages (`site/` e `.github/workflows/pages.yml`).
 
 ### Modificado
 
@@ -49,5 +52,6 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 - Acesso pela tailnet com `tailscale serve`, lista de aparelhos permitidos e proteção contra DNS rebinding.
 - Serviço em segundo plano no macOS via LaunchAgent (`scripts/servico.sh`).
 
-[Não publicado]: https://github.com/brunomartinsmv/orelha/compare/v1.0.0...HEAD
+[Não publicado]: https://github.com/brunomartinsmv/orelha/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/brunomartinsmv/orelha/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/brunomartinsmv/orelha/releases/tag/v1.0.0
