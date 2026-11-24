@@ -363,10 +363,10 @@
       spines.forEach((s) => {
         s.addEventListener('click', () => {
           pullSpine(s.dataset.book);
-          s.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+          s.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         });
         s.addEventListener('focus', () => {
-          s.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+          s.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         });
         s.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' || e.key === ' ') {
