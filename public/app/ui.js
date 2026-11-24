@@ -1,5 +1,5 @@
 import { html, useEffect, useRef, useState } from '/vendor/htm-preact.js';
-import { authorLine, coverUrl, effectiveTheme, fallbackTone, onColor, onTheme, onToast, ratingText, setTheme } from './lib.js';
+import { authorLine, coverUrl, effectiveTheme, fallbackTone, onColor, onTheme, onToast, plural, ratingText, setTheme } from './lib.js';
 
 // ---------- Ícones ----------
 
@@ -60,6 +60,13 @@ export function Cover({ book, size = 'M' }) {
       ? html`<img src=${url} alt=${`Capa de ${book.title}`} loading="lazy" decoding="async" onError=${() => setFailed(true)} />`
       : html`<${GeneratedCover} book=${book} tone=${book.color || fallbackTone(book)} />`}
   </span></span>`;
+}
+
+export function ReadingEstimate({ estimate }) {
+  if (!estimate) return null;
+  const { pages_per_day, days_left } = estimate;
+  const rate = pages_per_day < 0.1 ? '<0,1' : pages_per_day.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+  return html`<p class="reading-estimate">${rate} pág./dia · cerca de ${plural(days_left, 'dia', 'dias')} para terminar</p>`;
 }
 
 export function BookCard({ book, showRating = false }) {

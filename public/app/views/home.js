@@ -1,6 +1,6 @@
 import { html, useEffect, useRef, useState } from '/vendor/htm-preact.js';
 import { act, api, authorLine, num, useBookTone, useFetch } from '../lib.js';
-import { Cover, ErrorBox, Icon, ThemeToggle } from '../ui.js';
+import { Cover, ErrorBox, Icon, ReadingEstimate, ThemeToggle } from '../ui.js';
 import { GoalLine, LogSheet, ProgressSheet } from '../sheets.js';
 
 export function DemoNotice() {
@@ -44,6 +44,7 @@ export function ReadingCard({ book, single = false }) {
           <span class="progress-edit">${book.pages && book.current_page ? `${pct}%` : ''}<${Icon.edit} /></span>
         </span>
       </button>
+      <${ReadingEstimate} estimate=${book.reading_estimate} />
     </div>
     ${sheet === 'progress' && html`<${ProgressSheet} book=${book} onClose=${() => setSheet(null)} onFinish=${() => setSheet('log')} />`}
     ${sheet === 'log' && html`<${LogSheet} book=${book} onClose=${() => setSheet(null)} />`}

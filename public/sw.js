@@ -1,7 +1,8 @@
 // Mantém o app abrindo e mostrando a última cópia dos dados quando o servidor está fora do ar.
-const VERSION = 'orelha-v9';
+const VERSION = 'orelha-v10';
 const SHELL = `${VERSION}-shell`;
-const DATA = `${VERSION}-data`;
+// O shell novo continua lendo os dados guardados antes da atualização.
+const DATA = 'orelha-v9-data';
 const COVERS = 'orelha-covers-v1';
 
 const SHELL_FILES = [

@@ -157,7 +157,7 @@ export function ShelfView({ search, focus }) {
 
   const pickFilter = (id) => {
     setFilter(id);
-    history.replaceState(null, '', id === 'read' ? '/estante' : `/estante?f=${id}`);
+    history.replaceState(history.state, '', id === 'read' ? '/estante' : `/estante?f=${id}`);
   };
   const pickSort = (e) => { writePref(prefKey('shelfSort'), e.target.value); setPrefs(prefs + 1); };
   const pickView = (v) => { writePref(prefKey('view'), v); setPrefs(prefs + 1); };

@@ -78,6 +78,7 @@ export function createApp(config) {
   route('GET', '/api/profile', () => lib.profile());
   route('GET', '/api/shelf', ({ query }) => lib.shelfList({ status: query.get('status'), q: query.get('q') }));
   route('GET', '/api/diary', ({ query }) => lib.diary({ year: query.get('year') }));
+  route('GET', '/api/diary/calendar', ({ query }) => lib.diaryCalendar(query.get('month')));
   route('GET', '/api/stats', ({ query }) => lib.stats({ year: query.get('year') }));
   route('GET', '/api/quotes', () => lib.allQuotes());
 
