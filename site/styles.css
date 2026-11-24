@@ -229,11 +229,17 @@ img, video {
 .shelf-wrap {
   padding-left: 0;
   padding-right: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #355046 #09120F;
 }
 
 .hero-shelf-svg {
   display: block;
   width: 100%;
+  min-width: 760px;
   height: auto;
 }
 

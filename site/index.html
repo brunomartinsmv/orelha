@@ -78,7 +78,7 @@
                 <text x="45" y="114" fill="#181210" font-family="Literata, Georgia, serif" font-size="13" font-weight="500" text-anchor="middle" transform="rotate(90 45 114)">Torto Arado</text>
               </g>
 
-              <g class="spine-group" data-book="sertao" data-pulled="true" tabindex="0" role="button" aria-label="Grande Sertão: Veredas, João Guimarães Rosa">
+              <g class="spine-group" data-book="sertao" data-pulled="true" aria-current="true" tabindex="0" role="button" aria-label="Grande Sertão: Veredas, João Guimarães Rosa">
                 <rect x="66" y="24" width="54" height="186" rx="2" fill="#1A2220" />
                 <rect x="66" y="24" width="54" height="186" rx="2" fill="url(#spineHighlight)" />
                 <rect x="66" y="38" width="54" height="2" fill="#E6B84C" opacity="0.85" />
@@ -179,7 +179,7 @@
 
       <div class="shelf-rail">
         <div class="wrap shelf-rail-inner">
-          <span id="shelf-readout"><strong>Grande Sertão: Veredas</strong>, Guimarães Rosa, 608 p., nota 5</span>
+          <span id="shelf-readout" role="status" aria-live="polite"><strong>Grande Sertão: Veredas</strong>, Guimarães Rosa, 608 p., nota 5</span>
           <span class="shelf-hint">Clique numa lombada para puxar</span>
         </div>
       </div>
@@ -257,7 +257,7 @@
               Instale o Orelha na Tela de Início do iPhone ou Android pela sua rede privada Tailscale. As capas e a estante permanecem em cache para abertura imediata mesmo fora de casa.
             </p>
             <p>
-              Atualizou a página atual, salvou um sublinhado ou terminou um livro sem conexão? Uma fila local em IndexedDB sincroniza cada alteração em ordem assim que o servidor voltar.
+              Atualizou a página atual, salvou um sublinhado ou marcou um livro como Quero ler sem conexão? Uma fila local em IndexedDB sincroniza cada alteração em ordem assim que o servidor voltar.
             </p>
           </div>
         </div>
@@ -282,7 +282,7 @@
           </div>
           <div class="ledger-row">
             <dt>Portabilidade total</dt>
-            <dd>Importação idempotente de CSV do Skoob, Goodreads e StoryGraph, backups diários automáticos com espelho opcional via rclone e exportação completa em CSV ou JSON.</dd>
+            <dd>Importação idempotente de CSV do Skoob, Goodreads e StoryGraph, backups diários automáticos ao instalar o serviço (com espelho opcional via rclone) e exportação completa em CSV ou JSON.</dd>
           </div>
         </dl>
       </div>
@@ -293,7 +293,7 @@
         <div class="install-copy">
           <h2>Comece em um minuto</h2>
           <p>
-            Só precisa de Node.js 24 ou superior. O modo demonstração enche a estante para testar e um clique em Começar do zero limpa tudo sem tocar no que você registrou.
+            Só precisa de Node.js 24 ou superior. O modo demonstração enche a estante para testar. Começar do zero remove os registros de exemplo, inclusive as edições feitas neles.
           </p>
           <a class="link-quiet" href="https://github.com/brunomartinsmv/orelha#acesso-pela-tailnet" target="_blank" rel="noreferrer">
             Ver guia da Tailnet e serviço
@@ -352,13 +352,22 @@
 
       const pullSpine = (key) => {
         spines.forEach((s) => {
-          s.dataset.pulled = String(s.dataset.book === key);
+          const active = s.dataset.book === key;
+          s.dataset.pulled = String(active);
+          if (active) s.setAttribute('aria-current', 'true');
+          else s.removeAttribute('aria-current');
         });
         if (BOOKS[key]) readout.innerHTML = BOOKS[key];
       };
 
       spines.forEach((s) => {
-        s.addEventListener('click', () => pullSpine(s.dataset.book));
+        s.addEventListener('click', () => {
+          pullSpine(s.dataset.book);
+          s.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        });
+        s.addEventListener('focus', () => {
+          s.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        });
         s.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
