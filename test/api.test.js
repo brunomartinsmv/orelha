@@ -55,6 +55,12 @@ async function call(method, path, body, headers = {}) {
 const newBook = async (title = 'Livro', extra = {}) =>
   (await call('POST', '/books', { title, authors: 'Fulana de Tal', pages: 300, ...extra })).json;
 
+const dayAgo = (days) => {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date.toLocaleDateString('en-CA');
+};
+
 // fetch não deixa trocar o header Host, então usamos http cru.
 async function rawGet(path, headers) {
   const { request } = await import('node:http');
@@ -145,6 +151,160 @@ test('progresso não passa do total de páginas e põe o livro em Lendo', async 
   const ok = await call('POST', `/books/${book.id}/progress`, { page: 120, on_day: '2026-04-01' });
   assert.equal(ok.json.status, 'reading');
   assert.equal(ok.json.current_page, 120);
+});
+
+test('calendário inclui mês só com progresso e preserva todas as conclusões no mesmo dia', async () => {
+  const a = await newBook('Calendário A', { isbn: '9788535914849' });
+  const b = await newBook('Calendário B');
+  const calendar = (month) => call('GET', `/diary/calendar?month=${month}`);
+  for (const month of ['', '2024-2', '2024-00', '2024-13', '0000-01']) {
+    assert.equal((await calendar(month)).status, 400);
+  }
+  assert.equal((await call('GET', '/diary/calendar')).status, 400);
+  await call('POST', `/books/${a.id}/progress`, { page: 10, on_day: '2024-01-31' });
+  await call('POST', `/books/${a.id}/progress`, { page: 40, on_day: '2024-02-01' });
+  await call('POST', `/books/${a.id}/progress`, { page: 35, on_day: '2024-02-01' });
+  await call('POST', `/books/${b.id}/progress`, { page: 30, on_day: '2024-02-01' });
+  await call('POST', `/books/${b.id}/progress`, { page: 70, on_day: '2024-02-29' });
+  await call('POST', `/books/${b.id}/progress`, { page: 80, on_day: '2024-03-01' });
+  assert.deepEqual((await calendar('2024-02')).json, {
+    month: '2024-02', finishes: [], progress_days: ['2024-02-01', '2024-02-29'],
+  });
+
+  await call('POST', `/books/${a.id}/logs`, { finished_on: '2024-02-29' });
+  await call('POST', `/books/${b.id}/logs`, { finished_on: '2024-02-29' });
+  await call('POST', `/books/${b.id}/logs`, { finished_on: '2024-03-01', reread: true });
+  await call('POST', `/books/${b.id}/logs`, { rating: 6 });
+  const month = (await calendar('2024-02')).json;
+  assert.deepEqual(month.finishes.map(({ book, finished_on }) => [book.id, book.cover, finished_on]), [
+    [a.id, '/covers/isbn/9788535914849', '2024-02-29'],
+    [b.id, null, '2024-02-29'],
+  ]);
+  assert.deepEqual(month.progress_days, ['2024-02-01', '2024-02-29']);
+  assert.deepEqual((await calendar('2024-03')).json.progress_days, ['2024-03-01']);
+  assert.equal((await call('GET', '/diary?year=2024')).json.entries.length, 3);
+});
+
+test('Home e livro usam o último registro diário para calcular o avanço líquido recente', async () => {
+  const book = await newBook('Ritmo recente', { pages: 240 });
+  const path = `/books/${book.id}`;
+  for (const [page, days] of [[150, 120], [10, 10], [40, 10], [90, 5], [100, 5]]) {
+    await call('POST', `${path}/progress`, { page, on_day: dayAgo(days) });
+  }
+  const detail = (await call('GET', path)).json;
+  const estimate = { pages_per_day: 12, days_left: 12 };
+  assert.deepEqual(detail.book.reading_estimate, estimate);
+  assert.deepEqual(detail.progress.map((entry) => entry.page), [100, 90, 40, 10, 150]);
+  assert.deepEqual((await call('GET', '/home')).json.reading.find((b) => b.id === book.id).reading_estimate, estimate);
+
+  await call('POST', `${path}/progress`, { page: 4, on_day: dayAgo(5) });
+  assert.equal((await call('GET', path)).json.book.reading_estimate, null);
+  await call('POST', `${path}/progress`, { page: 240, on_day: dayAgo(4) });
+  assert.equal((await call('GET', path)).json.book.reading_estimate, null);
+});
+
+test('previsão precisa de datas distintas, atividade recente e total de páginas', async () => {
+  const book = await newBook('Começo com data', { pages: 180 });
+  const path = `/books/${book.id}`;
+  const detail = async () => (await call('GET', path)).json;
+  await call('POST', `${path}/progress`, { page: 25, on_day: dayAgo(3) });
+  await call('POST', `${path}/progress`, { page: 30, on_day: dayAgo(3) });
+  assert.equal((await detail()).book.reading_estimate, null);
+
+  await call('PUT', `${path}/shelf`, { started_on: dayAgo(6) });
+  assert.deepEqual((await detail()).book.reading_estimate, { pages_per_day: 10, days_left: 15 });
+  await call('POST', `${path}/progress`, { page: 40, on_day: dayAgo(2) });
+  assert.deepEqual((await detail()).book.reading_estimate, { pages_per_day: 10, days_left: 14 });
+  await call('PATCH', path, { pages: null });
+  assert.equal((await detail()).book.reading_estimate, null);
+
+  const old = await newBook('Leitura sem atividade recente');
+  await call('POST', `/books/${old.id}/progress`, { page: 25, on_day: dayAgo(20) });
+  await call('POST', `/books/${old.id}/progress`, { page: 50, on_day: dayAgo(15) });
+  assert.equal((await call('GET', `/books/${old.id}`)).json.book.reading_estimate, null);
+});
+
+test('ritmo respeita a janela de duas semanas e aceita um dia de diferença de fuso', async () => {
+  const book = await newBook('Limites do ritmo', { pages: 200 });
+  const path = `/books/${book.id}`;
+  const estimate = async () => (await call('GET', path)).json.book.reading_estimate;
+  await call('POST', `${path}/progress`, { page: 30, on_day: dayAgo(13) });
+  await call('POST', `${path}/progress`, { page: 100, on_day: dayAgo(-1) });
+  assert.deepEqual(await estimate(), { pages_per_day: 5, days_left: 20 });
+  await call('POST', `${path}/progress`, { page: 105, on_day: dayAgo(-2) });
+  assert.equal(await estimate(), null);
+});
+
+test('ritmo aceita uma referência mais antiga quando só há um dia anotado na janela recente', async () => {
+  const book = await newBook('Anotações espaçadas', { pages: 200 });
+  const path = `/books/${book.id}`;
+  const estimate = async () => (await call('GET', path)).json.book.reading_estimate;
+  await call('POST', `${path}/progress`, { page: 180, on_day: dayAgo(29) });
+  await call('POST', `${path}/progress`, { page: 100, on_day: dayAgo(0) });
+  assert.equal(await estimate(), null);
+
+  await call('POST', `${path}/progress`, { page: 50, on_day: dayAgo(16) });
+  await call('POST', `${path}/progress`, { page: 100, on_day: dayAgo(0) });
+  assert.deepEqual(await estimate(), { pages_per_day: 3.125, days_left: 32 });
+
+  const started = await newBook('Início há mais de duas semanas', { pages: 200 });
+  const startedPath = `/books/${started.id}`;
+  await call('PUT', `${startedPath}/shelf`, { status: 'reading', started_on: dayAgo(20) });
+  await call('POST', `${startedPath}/progress`, { page: 100, on_day: dayAgo(0) });
+  assert.deepEqual((await call('GET', startedPath)).json.book.reading_estimate, { pages_per_day: 5, days_left: 20 });
+});
+
+test('histórico e previsão da releitura descartam o dia da conclusão anterior', async () => {
+  const book = await newBook('Releitura no mesmo dia', { pages: 200 });
+  const path = `/books/${book.id}`;
+  const detail = async () => (await call('GET', path)).json;
+  await call('POST', `${path}/progress`, { page: 150, on_day: dayAgo(8) });
+  await call('POST', `${path}/progress`, { page: 180, on_day: dayAgo(5) });
+  await call('POST', `${path}/logs`, { finished_on: dayAgo(5) });
+  assert.deepEqual((await detail()).progress, []);
+
+  await call('POST', `${path}/progress`, { page: 20, on_day: dayAgo(5) });
+  await call('POST', `${path}/progress`, { page: 40, on_day: dayAgo(4) });
+  const reread = await detail();
+  assert.deepEqual(reread.progress.map((entry) => entry.page), [40]);
+  assert.equal(reread.book.reading_estimate, null);
+
+  await call('POST', `${path}/progress`, { page: 80, on_day: dayAgo(2) });
+  assert.deepEqual((await detail()).book.reading_estimate, { pages_per_day: 20, days_left: 6 });
+  await call('POST', `${path}/progress`, { page: 60, on_day: dayAgo(3) });
+  assert.equal((await detail()).book.reading_estimate, null);
+});
+
+test('um novo início após concluir filtra anotações antigas mesmo sem data de conclusão', async () => {
+  const book = await newBook('Releitura sem data de conclusão');
+  const path = `/books/${book.id}`;
+  await call('POST', `${path}/progress`, { page: 150, on_day: dayAgo(6) });
+  await call('POST', `${path}/progress`, { page: 180, on_day: dayAgo(0) });
+  await call('POST', `${path}/logs`, { rating: 8 });
+  const ambiguous = await call('POST', `${path}/progress`, { page: 10, on_day: dayAgo(0) });
+  assert.equal(ambiguous.json.progress_entry, null);
+  const recorded = await call('POST', `${path}/progress`, { page: 30, on_day: dayAgo(-1) });
+  const detail = (await call('GET', path)).json;
+  assert.deepEqual(detail.progress, [recorded.json.progress_entry]);
+  assert.equal(detail.progress[0].page, 30);
+  assert.equal(detail.book.reading_estimate, null);
+});
+
+test('reiniciar a leitura depois de marcar Lido pela API cria nova data de início', async () => {
+  const book = await newBook('Recomeço pela API', { pages: 200 });
+  const path = `/books/${book.id}`;
+  await call('POST', `${path}/progress`, { page: 180, on_day: dayAgo(20) });
+  await call('PUT', `${path}/shelf`, { status: 'read' });
+  const result = await call('PUT', `${path}/shelf`, { status: 'reading', on_day: dayAgo(4) });
+  assert.equal(result.json.started_on, dayAgo(4));
+  await call('POST', `${path}/progress`, { page: 40, on_day: dayAgo(2) });
+  const detail = (await call('GET', path)).json;
+  assert.deepEqual(detail.progress.map((entry) => entry.page), [40]);
+  assert.deepEqual(detail.book.reading_estimate, { pages_per_day: 20, days_left: 8 });
+  await call('PUT', `${path}/shelf`, { status: 'read' });
+  const progress = await call('POST', `${path}/progress`, { page: 20, on_day: dayAgo(0) });
+  assert.equal(progress.json.started_on, dayAgo(0));
+  assert.deepEqual((await call('GET', path)).json.progress, [progress.json.progress_entry]);
 });
 
 test('números do ano somam leituras, páginas e meias estrelas', async () => {
@@ -283,7 +443,14 @@ test('JSON malformado vira 400, não 500', async () => {
   assert.equal((await call('POST', '/books', '{quebrado')).status, 400);
 });
 
-test('na home, atualizar a página não troca os livros de lugar e a citação vem do Wikiquote', async () => {
+test('na home, atualizar a página não troca os livros de lugar e a citação vem do Wikiquote', async (t) => {
+  // O Wikiquote só considera oito livros abertos. Isole os candidatos deste teste.
+  const otherBooks = db.prepare("SELECT book_id FROM shelf WHERE status = 'reading'").all();
+  db.prepare("UPDATE shelf SET status = NULL WHERE status = 'reading'").run();
+  t.after(() => {
+    const restore = db.prepare("UPDATE shelf SET status = 'reading' WHERE book_id = ?");
+    for (const { book_id } of otherBooks) restore.run(book_id);
+  });
   const first = await newBook('Começado antes');
   const second = await newBook('Começado depois');
   await call('POST', `/books/${first.id}/progress`, { page: 10, on_day: '2026-01-02' });

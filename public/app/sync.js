@@ -28,15 +28,26 @@ export function bookSnapshot(book) {
   };
 }
 
+function readingChanged(previous, next) {
+  return previous.status !== next.status || previous.started_on !== next.started_on;
+}
+
+function withoutStaleEstimate(previous, next, kind) {
+  if (next.reading_estimate && (kind === 'progress' || readingChanged(previous, next) || previous.current_page !== next.current_page)) {
+    return { ...next, reading_estimate: null };
+  }
+  return next;
+}
+
 export function applyBookOp(book, op) {
   if (!book || !op || op.book_id !== book.id) return book;
   if (op.kind === 'progress') {
-    return {
+    return withoutStaleEstimate(book, {
       ...book,
       status: 'reading',
       current_page: op.payload.page,
-      started_on: book.started_on || op.payload.on_day || null,
-    };
+      started_on: (book.status === 'read' ? null : book.started_on) || op.payload.on_day || null,
+    }, op.kind);
   }
   if (op.kind === 'shelf') {
     const next = { ...book };
@@ -44,7 +55,7 @@ export function applyBookOp(book, op) {
       const status = op.payload.status;
       next.status = status;
       if (status === 'reading') {
-        next.started_on = next.started_on || op.payload.on_day || null;
+        next.started_on = (book.status === 'read' ? null : book.started_on) || op.payload.on_day || null;
       } else if (status === 'want' || status === null) {
         next.started_on = null;
       }
@@ -54,7 +65,7 @@ export function applyBookOp(book, op) {
     }
     if (op.payload.liked !== undefined) next.liked = !!op.payload.liked;
     if (op.payload.started_on !== undefined) next.started_on = op.payload.started_on;
-    return next;
+    return withoutStaleEstimate(book, next, op.kind);
   }
   return book;
 }
@@ -65,6 +76,7 @@ function parseApiPath(path) {
   const pathname = qIndex === -1 ? path : path.slice(0, qIndex);
   const search = qIndex === -1 ? '' : path.slice(qIndex + 1);
   if (pathname === '/home') return { route: 'home' };
+  if (pathname === '/diary/calendar') return { route: 'calendar', month: new URLSearchParams(search).get('month') };
   if (pathname === '/quotes') return { route: 'quotes' };
   if (pathname === '/profile') return { route: 'profile' };
   if (pathname === '/shelf') {
@@ -95,13 +107,25 @@ function sortQuotes(quotes) {
   });
 }
 
-function mergeConfirmedBook(existing, serverResult) {
+function mergeConfirmedBook(existing, serverResult, kind) {
   if (!existing) return serverResult;
-  return {
+  return withoutStaleEstimate(existing, {
     ...existing,
     ...serverResult,
     genres: serverResult.genres ?? existing.genres,
-  };
+  }, kind);
+}
+
+function patchBookPage(data, book, entry) {
+  const progress = readingChanged(data.book, book) ? [] : (data.progress || []);
+  if (!entry || progress.some((row) => row.id === entry.id || (entry.pending && row.confirmed_op_id === entry.op_id))) {
+    return { ...data, book, progress };
+  }
+  const index = progress.findIndex((row) => row.on_day < entry.on_day ||
+    (row.on_day === entry.on_day && (entry.pending || (!row.pending && row.id < entry.id))));
+  const next = [...progress];
+  next.splice(index < 0 ? next.length : index, 0, entry);
+  return { ...data, book, progress: next };
 }
 
 function applyBookToHome(data, bookId, updateFn) {
@@ -255,7 +279,12 @@ export function applyPendingToPath(path, data, items) {
     } else if (parsed.route === 'book') {
       if (op.book_id !== parsed.bookId) continue;
       if ((op.kind === 'progress' || op.kind === 'shelf') && next.book) {
-        next = { ...next, book: applyBookOp(next.book, op) };
+        const book = applyBookOp(next.book, op);
+        const day = op.payload.on_day;
+        const entry = op.kind === 'progress' && day && day >= (book.started_on || '') && day > (book.last_finished || '') ? {
+          id: `pending:${op.op_id}`, op_id: op.op_id, page: op.payload.page, on_day: day, pending: true,
+        } : null;
+        next = patchBookPage(next, book, entry);
       } else if (op.kind === 'quote' && Array.isArray(next.quotes)) {
         next = { ...next, quotes: appendSortedQuote(next.quotes, pendingQuoteRow(op)) };
       }
@@ -279,26 +308,34 @@ export function patchDataWithConfirmed(path, data, op, serverResult) {
   if (!data || !op || !serverResult) return data;
   const parsed = parseApiPath(path);
   if (!parsed) return data;
+  const { progress_entry: progressEntry, ...result } = serverResult;
 
   if (parsed.route === 'home' && (op.kind === 'progress' || op.kind === 'shelf')) {
-    return applyBookToHome(data, op.book_id, (cur) => mergeConfirmedBook(cur || op.book_snapshot, serverResult));
+    return applyBookToHome(data, op.book_id, (cur) => mergeConfirmedBook(cur || op.book_snapshot, result, op.kind));
+  }
+  if (parsed.route === 'calendar' && op.kind === 'progress') {
+    const day = op.payload.on_day;
+    if (day?.slice(0, 7) === parsed.month && Array.isArray(data.progress_days) && !data.progress_days.includes(day)) {
+      return { ...data, progress_days: [...data.progress_days, day].sort() };
+    }
   }
   if (parsed.route === 'book' && op.book_id === parsed.bookId) {
     if ((op.kind === 'progress' || op.kind === 'shelf') && data.book) {
-      return { ...data, book: mergeConfirmedBook(data.book, serverResult) };
+      const entry = progressEntry ? { ...progressEntry, confirmed_op_id: op.op_id } : null;
+      return patchBookPage(data, mergeConfirmedBook(data.book, result, op.kind), entry);
     }
     if (op.kind === 'quote' && Array.isArray(data.quotes)) {
       return { ...data, quotes: appendSortedQuote(data.quotes, serverResult) };
     }
   }
   if (parsed.route === 'shelf' && (op.kind === 'progress' || op.kind === 'shelf')) {
-    return applyBookToShelf(data, op.book_id, parsed.status, parsed.q, (cur) => mergeConfirmedBook(cur || op.book_snapshot, serverResult));
+    return applyBookToShelf(data, op.book_id, parsed.status, parsed.q, (cur) => mergeConfirmedBook(cur || op.book_snapshot, result));
   }
   if (parsed.route === 'quotes' && op.kind === 'quote') {
     return prependQuote(data, { ...serverResult, book: op.book_snapshot || serverResult.book });
   }
   if (parsed.route === 'profile') {
-    const confirmedMap = new Map([[op.op_id, serverResult]]);
+    const confirmedMap = new Map([[op.op_id, result]]);
     return applyOpsToProfile(data, [op], confirmedMap);
   }
   return data;
@@ -313,6 +350,9 @@ export function affectedPathsForOp(op) {
     `/books/${encodeURIComponent(op.book_id)}`,
   ];
   if (op.kind === 'quote') paths.push('/quotes');
+  if (op.kind === 'progress' && op.payload.on_day) {
+    paths.push(`/diary/calendar?month=${op.payload.on_day.slice(0, 7)}`);
+  }
   return paths;
 }
 

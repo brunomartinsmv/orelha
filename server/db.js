@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS progress (
   demo INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS progress_day ON progress(on_day);
+CREATE INDEX IF NOT EXISTS progress_book_day ON progress(book_id, on_day, id);
 
 CREATE TABLE IF NOT EXISTS quotes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

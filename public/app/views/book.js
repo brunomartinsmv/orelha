@@ -1,6 +1,6 @@
 import { html, useRef, useState } from '/vendor/htm-preact.js';
 import { act, api, authorLine, formatDate, navigate, num, queueShelfStatus, ratingText, toast, useBookTone, useFetch } from '../lib.js';
-import { Cover, ErrorBox, Icon, Rail, Sheet, Stars } from '../ui.js';
+import { Cover, ErrorBox, Icon, Rail, ReadingEstimate, Sheet, Stars } from '../ui.js';
 import { ListPickerSheet, LogSheet, ProgressSheet, QuoteSheet, GenrePicker } from '../sheets.js';
 
 const FORMAT_LABEL = { paper: 'papel', ebook: 'e-book', audio: 'áudio' };
@@ -183,7 +183,7 @@ export function BookView({ id }) {
 }
 
 function BookLoaded({ data, sheet, setSheet }) {
-  const { book, community, logs, quotes, lists, favorite_slot: favoriteSlot } = data;
+  const { book, community, logs, progress, quotes, lists, favorite_slot: favoriteSlot } = data;
   const tone = useBookTone(book);
   const [editLog, setEditLog] = useState(null);
   const [savingStatus, setSavingStatus] = useState(false);
@@ -233,6 +233,7 @@ function BookLoaded({ data, sheet, setSheet }) {
                 <span>${book.current_page ? `pág. ${num(book.current_page)}${book.pages ? ` de ${num(book.pages)} · ${pct}%` : ''}` : 'Ainda no começo'}</span>
                 <button class="btn small" onClick=${() => setSheet('progress')}>Atualizar página</button>
               </div>
+              <${ReadingEstimate} estimate=${book.reading_estimate} />
             </div>`}
           </div>
         </div>
@@ -241,6 +242,15 @@ function BookLoaded({ data, sheet, setSheet }) {
 
     <div class="book-columns">
       <div style="min-width:0">
+        ${book.status === 'reading' && progress?.length > 0 && html`<details class="section progress-history">
+          <summary>Histórico de progresso</summary>
+          <ul>
+            ${progress.map((entry) => html`<li key=${entry.id}>
+              <time datetime=${entry.on_day}>${formatDate(entry.on_day)}</time>
+              <span>Página ${num(entry.page)}${entry.pending ? ' · aguardando sincronização' : ''}</span>
+            </li>`)}
+          </ul>
+        </details>`}
         <${About} book=${book} />
 
         ${logs.length > 0 && html`<section class="section">

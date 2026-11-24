@@ -7,6 +7,11 @@ e o projeto adota o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 ## [Não publicado]
 
+### Adicionado
+
+- Calendário mensal no Diário, com capas de livros terminados e marcações nos dias com progresso registrado.
+- Histórico da leitura atual na página do livro e previsão de término na Home e no livro. O ritmo usa os registros dos 14 dias anteriores à última anotação. Quando há só um dia anotado nesse intervalo, aceita uma referência de até 28 dias. A previsão some após 14 dias sem novos registros.
+
 ## [1.1.0] - 2026-11-22
 
 ### Adicionado

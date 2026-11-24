@@ -13,6 +13,7 @@ const { createApp } = await import('../server/app.js');
 const { db } = await import('../server/db.js');
 const { pruneSyncOps } = await import('../server/library.js');
 const {
+  affectedPathsForOp,
   applyPendingToPath,
   classifyHttpResponse,
   createMemoryStore,
@@ -504,6 +505,48 @@ test('patchDataWithConfirmed atualiza cache em memória sem perder a mudança co
   assert.equal(memory.get('/quotes').data[0].text, 'Confirmado na memória.');
   assert.equal(memory.get('/profile').data.counts.quotes, cachedProfile.counts.quotes + 1);
   assert.equal(memory.get('/profile').data.counts.reading, cachedProfile.counts.reading + 1);
+});
+
+test('a fila invalida previsões antigas e marca o calendário só após a confirmação', () => {
+  const book = {
+    id: 'm_ritmo', status: 'reading', started_on: '2026-11-20', current_page: 55,
+    reading_estimate: { pages_per_day: 10, days_left: 15 },
+  };
+  const progress = [{ id: 1, page: 55, on_day: '2026-11-22' }];
+  const bookPath = `/books/${book.id}`;
+  const operation = { kind: 'progress', op_id: 'local-progress', book_id: book.id, payload: { page: 70, on_day: '2026-11-23' } };
+  const entry = { id: 2, page: 70, on_day: '2026-11-23' };
+  const { reading_estimate, ...confirmed } = { ...book, current_page: 70, progress_entry: entry };
+  const calendarPath = '/diary/calendar?month=2026-11';
+  const calendar = { month: '2026-11', finishes: [], progress_days: ['2026-11-22'] };
+
+  assert.equal(applyPendingToPath('/home', { reading: [book] }, [operation]).reading[0].reading_estimate, null);
+  const pending = applyPendingToPath(bookPath, { book, progress }, [operation]);
+  assert.equal(pending.book.reading_estimate, null);
+  assert.deepEqual(pending.progress.map(({ page, pending }) => [page, !!pending]), [[70, true], [55, false]]);
+  const saved = patchDataWithConfirmed(bookPath, { book, progress }, operation, confirmed);
+  assert.equal(saved.book.reading_estimate, null);
+  assert.equal(saved.book.progress_entry, undefined);
+  assert.deepEqual(saved.progress.map(({ id }) => id), [2, 1]);
+  assert.deepEqual(applyPendingToPath(bookPath, saved, [operation]).progress, saved.progress);
+  assert.deepEqual(patchDataWithConfirmed(bookPath, saved, operation, confirmed).progress, saved.progress);
+  assert.equal(applyPendingToPath(calendarPath, calendar, [operation]), calendar);
+  const patched = patchDataWithConfirmed(calendarPath, calendar, operation, confirmed);
+  assert.deepEqual(patched.progress_days, ['2026-11-22', '2026-11-23']);
+  assert.equal(patchDataWithConfirmed(calendarPath, patched, operation, confirmed), patched);
+  assert.equal(patchDataWithConfirmed('/diary/calendar?month=2026-10', calendar, operation, confirmed), calendar);
+  assert.ok(affectedPathsForOp(operation).includes(calendarPath));
+
+  const shelf = { kind: 'shelf', book_id: book.id, payload: { started_on: '2026-11-23' } };
+  assert.deepEqual(applyPendingToPath(bookPath, { book, progress }, [shelf]).progress, []);
+
+  const reread = { ...book, started_on: '2026-11-23', last_finished: '2026-11-23' };
+  for (const on_day of ['2026-11-22', '2026-11-23']) {
+    const ambiguous = { ...operation, payload: { page: 70, on_day } };
+    const pendingReread = applyPendingToPath(bookPath, { book: reread, progress: [] }, [ambiguous]);
+    assert.equal(pendingReread.book.current_page, 70);
+    assert.deepEqual(pendingReread.progress, []);
+  }
 });
 
 // `staleReads` simula abas em processos diferentes: as primeiras leituras ainda não veem a escrita da outra.

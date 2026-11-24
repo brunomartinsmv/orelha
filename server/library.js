@@ -152,22 +152,26 @@ async function ensureDetails(id) {
 
 export async function bookPage(id) {
   const row = await ensureDetails(id);
-  const community = row.ol_key ? await ol.communityData(row.ol_key).catch(() => null) : null;
+  const community = row.ol_key ? ol.communityData(row.ol_key).catch(() => null) : null;
   const subjects = JSON.parse(row.subjects || '[]');
+  const bounds = row.status === 'reading' ? progressBounds(row) : null;
+  const progress = bounds ? currentProgress(row.id, bounds) : [];
   return {
     book: {
       ...presentBook(row),
+      reading_estimate: readingEstimate(row, progress, today(), bounds?.after),
       description: row.description,
       subjects,
       genres: rec.genresOf(subjects),
       subject_genres: subjects.map((s) => rec.genresOf([s])),
       other_subjects: rec.otherSubjectsOf(subjects),
     },
-    community,
+    progress,
     logs: db.prepare('SELECT * FROM logs WHERE book_id = ? ORDER BY COALESCE(finished_on, created_at) DESC, id DESC').all(id).map(presentLog),
     quotes: db.prepare('SELECT * FROM quotes WHERE book_id = ? ORDER BY COALESCE(page, 999999), id').all(id),
     lists: db.prepare('SELECT l.id, l.title FROM lists l JOIN list_items i ON i.list_id = l.id WHERE i.book_id = ?').all(id),
     favorite_slot: db.prepare('SELECT slot FROM favorites WHERE book_id = ?').get(id)?.slot ?? null,
+    community: await community,
   };
 }
 
@@ -386,7 +390,8 @@ export function updateShelf(bookId, body) {
     if (body.status !== undefined) {
       if (body.status !== 'dropped') preserveLegacyDrop(bookId, prev.status);
       db.prepare(`UPDATE shelf SET status = ?, updated_at = datetime('now'),
-        started_on = CASE WHEN ? = 'reading' THEN COALESCE(started_on, ?) WHEN ? IN ('want') OR ? IS NULL THEN NULL ELSE started_on END,
+        started_on = CASE WHEN ? = 'reading' THEN COALESCE(CASE WHEN status IS NOT 'read' THEN started_on END, ?)
+          WHEN ? = 'want' OR ? IS NULL THEN NULL ELSE started_on END,
         current_page = CASE WHEN ? IN ('reading','dropped') THEN current_page ELSE NULL END
         WHERE book_id = ?`).run(body.status, body.status, onDay || today(), body.status, body.status, body.status, bookId);
       // Registra o evento apenas ao entrar em `dropped`; repetir o mesmo status não duplica nem data legados.
@@ -420,13 +425,62 @@ export function addProgress(bookId, body) {
     ensureShelf(bookId);
     const prev = db.prepare('SELECT status FROM shelf WHERE book_id = ?').get(bookId);
     preserveLegacyDrop(bookId, prev?.status);
-    db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?, started_on = COALESCE(started_on, ?), updated_at = datetime('now') WHERE book_id = ?`)
+    db.prepare(`UPDATE shelf SET status = 'reading', current_page = ?,
+      started_on = COALESCE(CASE WHEN status IS NOT 'read' THEN started_on END, ?), updated_at = datetime('now') WHERE book_id = ?`)
       .run(page, day, bookId);
-    db.prepare('INSERT INTO progress (book_id, page, on_day) VALUES (?, ?, ?)').run(bookId, page, day);
+    const { lastInsertRowid: id } = db.prepare('INSERT INTO progress (book_id, page, on_day) VALUES (?, ?, ?)').run(bookId, page, day);
     const result = presentBook(getBookRow(bookId));
+    const { start, after } = progressBounds(result);
+    result.progress_entry = day >= start && day > after ? { id, page, on_day: day } : null;
     saveSyncOp(opId, 'progress', bookId, result);
     return result;
   });
+}
+
+function progressBounds(book) {
+  const start = book.started_on || '';
+  let after = book.last_finished || '';
+  // Um registro de conclusão sem data também torna ambíguo o dia em que foi salvo.
+  if (start > after && db.prepare(`SELECT 1 FROM logs WHERE book_id = ? AND finished_on IS NULL
+      AND date(created_at, 'localtime') = ? LIMIT 1`).get(book.id, start)) after = start;
+  return { start, after };
+}
+
+function currentProgress(bookId, { start, after }) {
+  return db.prepare(`SELECT id, page, on_day FROM progress
+    WHERE book_id = ? AND on_day >= ? AND on_day > ?
+    ORDER BY on_day DESC, id DESC`).all(bookId, start, after);
+}
+
+const DAY_MS = 86_400_000;
+const RECENT_MS = 14 * DAY_MS;
+const SPARSE_MS = 28 * DAY_MS;
+
+function readingEstimate(book, progress, day, after) {
+  const latest = progress[0];
+  if (!latest || latest.page !== book.current_page || !book.pages || latest.page >= book.pages) return null;
+  const latestTime = Date.parse(latest.on_day);
+  const age = Date.parse(day) - latestTime;
+  // O celular pode já estar no dia seguinte ao do servidor.
+  if (!Number.isFinite(age) || age < -DAY_MS || age > RECENT_MS) return null;
+
+  const cutoff = latestTime - RECENT_MS;
+  const daily = progress.filter((point, i) => point.on_day !== progress[i - 1]?.on_day);
+  const earliestRecent = daily.findLast((point) => Date.parse(point.on_day) >= cutoff);
+  const sparse = earliestRecent === latest;
+  const baselineCutoff = sparse ? latestTime - SPARSE_MS : cutoff;
+  let baseline = sparse && Date.parse(daily[1]?.on_day) >= baselineCutoff ? daily[1] : earliestRecent;
+  if (baseline !== latest && latest.page <= baseline.page) return null;
+
+  if (book.started_on && book.started_on > after && book.started_on < progress.at(-1).on_day &&
+      Date.parse(book.started_on) >= (baseline === latest ? baselineCutoff : cutoff)) {
+    baseline = { on_day: book.started_on, page: 0 };
+  }
+  const days = (latestTime - Date.parse(baseline.on_day)) / DAY_MS;
+  const pages = latest.page - baseline.page;
+  if (!(days > 0 && pages > 0)) return null;
+  const pagesPerDay = pages / days;
+  return { pages_per_day: pagesPerDay, days_left: Math.ceil((book.pages - latest.page) / pagesPerDay) };
 }
 
 export function shelfList({ status, q }) {
@@ -515,6 +569,26 @@ export function diary({ year }) {
   return {
     years: db.prepare(`SELECT DISTINCT substr(finished_on, 1, 4) AS y FROM logs WHERE finished_on IS NOT NULL ORDER BY y DESC`).all().map((r) => Number(r.y)),
     entries: rows.map((r) => ({ ...presentLog(r), book: presentBook(getBookRow(r.book_id)) })),
+  };
+}
+
+export function diaryCalendar(month) {
+  if (!/^(?!0000)\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpError(400, 'Informe o mês no formato AAAA-MM.');
+  const first = `${month}-01`;
+  const end = new Date(`${first}T00:00:00Z`);
+  end.setUTCMonth(end.getUTCMonth() + 1, 0);
+  const last = end.toISOString().slice(0, 10);
+  const finishes = db.prepare(`SELECT b.*, l.id AS log_id, l.finished_on, l.rating AS my_rating,
+      s.status, s.liked, s.current_page, s.started_on
+    FROM logs l JOIN books b ON b.id = l.book_id
+    LEFT JOIN shelf s ON s.book_id = b.id
+    WHERE l.finished_on BETWEEN ? AND ? ORDER BY l.finished_on, l.id`).all(first, last);
+  const progress = db.prepare(`SELECT DISTINCT on_day FROM progress
+    WHERE on_day BETWEEN ? AND ? ORDER BY on_day`).all(first, last);
+  return {
+    month,
+    finishes: finishes.map((row) => ({ id: row.log_id, finished_on: row.finished_on, book: presentBook(row) })),
+    progress_days: progress.map((row) => row.on_day),
   };
 }
 
@@ -649,8 +723,12 @@ export function profile() {
 
 export async function home() {
   // Ordem de quando começou a ler: atualizar a página não tira o livro do lugar.
+  const day = today();
   const reading = db.prepare(`${BOOK_SELECT} WHERE s.status = 'reading'
-    ORDER BY s.started_on IS NULL, s.started_on DESC, b.title`).all().map(presentBook);
+    ORDER BY s.started_on IS NULL, s.started_on DESC, b.title`).all().map((row) => {
+      const bounds = progressBounds(row);
+      return { ...presentBook(row), reading_estimate: readingEstimate(row, currentProgress(row.id, bounds), day, bounds.after) };
+    });
   const recent = db.prepare(`SELECT * FROM logs WHERE finished_on IS NOT NULL ORDER BY finished_on DESC, id DESC LIMIT 10`).all()
     .map((l) => ({ ...presentLog(l), book: presentBook(getBookRow(l.book_id)) }));
   const books = db.prepare(`${BOOK_SELECT} WHERE s.status IN ('reading', 'read')
